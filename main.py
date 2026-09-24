@@ -40,15 +40,10 @@ def download_media_with_ytdlp(url: str, output_path: str, is_audio_only: bool = 
         'no_warnings': False,
         'nocheckcertificate': True,
         'geo_bypass': True,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['web', 'mweb']
-            }
-        }
+        # فعال‌سازی لاگین امن OAuth2 گوگل
+        'username': 'oauth2',
+        'oauth2_no_token_file': False,
     }
-
-    if os.path.exists("cookies.txt"):
-        ydl_opts['cookiefile'] = "cookies.txt"
 
     if is_audio_only:
         ydl_opts.update({
