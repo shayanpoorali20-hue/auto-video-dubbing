@@ -34,20 +34,15 @@ class ExtractAudioRequest(BaseModel):
 # توابع کمکی دانلود با yt-dlp
 # ---------------------------------------------------------------
 def download_media_with_ytdlp(url: str, output_path: str, is_audio_only: bool = False):
-    """دانلود ویدیو یا صوت با حداکثر سازگاری و پشتیبانی از کوکی"""
     ydl_opts = {
         'outtmpl': output_path,
         'quiet': False,
         'no_warnings': False,
-        # عدم گیر دادن به گواهی‌های شبکه و محدودیت‌های کوچک
         'nocheckcertificate': True,
-        'ignoreerrors': False,
-        'logtostderr': False,
-        # استخراج صبورانه
         'geo_bypass': True,
     }
 
-    # اگر فایل کوکی وجود دارد
+    # چک کردن فایل کوکی
     cookie_file = None
     if os.path.exists("cookies.txt"):
         cookie_file = "cookies.txt"
@@ -55,12 +50,12 @@ def download_media_with_ytdlp(url: str, output_path: str, is_audio_only: bool = 
         cookie_file = "cookie.txt"
 
     if cookie_file:
-        print(f"--- [DEBUG] Cookie file found: {cookie_file} ---")
+        print(f"--- [DEBUG] Using cookie file: {cookie_file} ---")
         ydl_opts['cookiefile'] = cookie_file
 
     if is_audio_only:
         ydl_opts.update({
-            # اگر فرمت بهترین صوت پیدا نشد، هر فرمتی که حداقل صدا دارد را بگیرد
+            # اولویت با بهترین کیفیت صدا، اگر نشد هر کیفیتی که صدا داشت
             'format': 'bestaudio/best/ba*',
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
@@ -75,7 +70,6 @@ def download_media_with_ytdlp(url: str, output_path: str, is_audio_only: bool = 
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
-
 
 # ---------------------------------------------------------------
 # توابع کمکی پردازش صدا و زمان‌بندی
