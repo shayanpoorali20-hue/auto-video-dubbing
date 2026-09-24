@@ -34,13 +34,17 @@ class ExtractAudioRequest(BaseModel):
 # توابع کمکی دانلود با yt-dlp
 # ---------------------------------------------------------------
 def download_media_with_ytdlp(url: str, output_path: str, is_audio_only: bool = False):
-    """دانلود ویدیو یا صوت از یوتیوب/اینستاگرام بدون خطای 403"""
+    """دانلود ویدیو یا صوت از یوتیوب/اینستاگرام با پشتیبانی از کوکی"""
     ydl_opts = {
         'outtmpl': output_path,
         'quiet': True,
         'no_warnings': True,
     }
     
+    # اگر فایل کوکی در ریپازیتوری وجود داشت، از آن استفاده کن
+    if os.path.exists("cookies.txt"):
+        ydl_opts['cookiefile'] = "cookies.txt"
+
     if is_audio_only:
         ydl_opts.update({
             'format': 'bestaudio/best',
