@@ -1,21 +1,25 @@
-FROM python:3.11-slim
+FROM python:3.10-slim
 
-# نصب FFmpeg، Rubberband و Node.js (برای حل چالش جاوااسکریپت yt-dlp)
-RUN apt-get update && apt-get install -y \
+# نصب ffmpeg و nodejs برای حل چالش‌های جاوااسکریپت یوتیوب
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
-    rubberband-cli \
+    nodejs \
     curl \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
+# کپی کردن فایل نیازمندی‌ها
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
+# نصب پکیج‌های پایتون و مطمئن شدن از آخرین آپدیت yt-dlp
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --upgrade --no-cache-dir yt-dlp
+
+# کپی کردن تمام فایل‌های پروژه (شامل main.py و cookies.txt)
 COPY . .
 
-EXPOSE 8000
+EXPOSE 10000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# اجرای سرور FastAPI
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000"]
