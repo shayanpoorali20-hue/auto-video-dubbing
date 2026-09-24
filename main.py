@@ -41,15 +41,15 @@ def download_media_with_ytdlp(url: str, output_path: str, is_audio_only: bool = 
         'no_warnings': False,
         'nocheckcertificate': True,
         'geo_bypass': True,
-        # تنظیم کلاینت برای جلوگیری از ارور The page needs to be reloaded
+        # استفاده از کلاینت اندروید و آیفون به جای مرورگر وب
         'extractor_args': {
             'youtube': {
-                'player_client': ['web_safari', 'web_embedded', '-tv_downgraded']
+                'player_client': ['android', 'ios']
             }
         }
     }
 
-    # بررسی و خواندن فایل کوکی در صورت وجود
+    # خواندن فایل کوکی در صورت وجود
     cookie_file = None
     if os.path.exists("cookies.txt"):
         cookie_file = "cookies.txt"
@@ -64,7 +64,7 @@ def download_media_with_ytdlp(url: str, output_path: str, is_audio_only: bool = 
 
     if is_audio_only:
         ydl_opts.update({
-            'format': 'bestaudio/best/ba*',
+            'format': 'bestaudio/best',
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'wav',
@@ -78,7 +78,6 @@ def download_media_with_ytdlp(url: str, output_path: str, is_audio_only: bool = 
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
-
 
 # ---------------------------------------------------------------
 # توابع پردازش صدا و زمان‌بندی FFmpeg
