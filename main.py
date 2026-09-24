@@ -40,9 +40,12 @@ def download_media_with_ytdlp(url: str, output_path: str, is_audio_only: bool = 
         'no_warnings': False,
         'nocheckcertificate': True,
         'geo_bypass': True,
-        # فعال‌سازی لاگین امن OAuth2 گوگل
-        'username': 'oauth2',
-        'oauth2_no_token_file': False,
+        # تغییر کلاینت به android/tv برای دور زدن قفل بوت دیتاسنتر
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'tv']
+            }
+        }
     }
 
     if is_audio_only:
