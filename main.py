@@ -31,7 +31,7 @@ class ExtractAudioRequest(BaseModel):
 
 
 # ---------------------------------------------------------------
-# توابع کمکی دانلود با yt-dlp
+# تابع اصلی دانلود با yt-dlp و کوکی
 # ---------------------------------------------------------------
 def download_media_with_ytdlp(url: str, output_path: str, is_audio_only: bool = False):
     ydl_opts = {
@@ -40,16 +40,20 @@ def download_media_with_ytdlp(url: str, output_path: str, is_audio_only: bool = 
         'no_warnings': False,
         'nocheckcertificate': True,
         'geo_bypass': True,
-        # تغییر کلاینت به android/tv برای دور زدن قفل بوت دیتاسنتر
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'tv']
-            }
-        }
     }
 
+    # خواندن فایل کوکی در صورت وجود
+    cookie_file = None
     if os.path.exists("cookies.txt"):
-    ydl_opts['cookiefile'] = "cookies.txt"
+        cookie_file = "cookies.txt"
+    elif os.path.exists("cookie.txt"):
+        cookie_file = "cookie.txt"
+
+    if cookie_file:
+        print(f"--- [DEBUG] Using cookie file: {cookie_file} ---")
+        ydl_opts['cookiefile'] = cookie_file
+    else:
+        print("--- [WARNING] No cookie file found! ---")
 
     if is_audio_only:
         ydl_opts.update({
@@ -67,6 +71,8 @@ def download_media_with_ytdlp(url: str, output_path: str, is_audio_only: bool = 
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
+
+
 # ---------------------------------------------------------------
 # توابع کمکی پردازش صدا و زمان‌بندی
 # ---------------------------------------------------------------
@@ -181,10 +187,9 @@ def download_file(url, save_path):
 # ---------------------------------------------------------------
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "Dubbing API with yt-dlp is running!"}
+    return {"status": "ok", "message": "Dubbing API is running!"}
 
 
-# ۱. استخراج مستقیم فایل صوتی برای Gemini
 @app.post("/get-audio-for-gemini")
 def get_audio_for_gemini(data: ExtractAudioRequest):
     temp_dir = tempfile.mkdtemp()
@@ -206,7 +211,6 @@ def get_audio_for_gemini(data: ExtractAudioRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ۲. پردازش و میکس نهایی دابله
 @app.post("/process-dubbing")
 def handle_dubbing(data: DubbingRequest):
     if len(data.subtitles) != len(data.audio_urls):
@@ -217,10 +221,8 @@ def handle_dubbing(data: DubbingRequest):
         video_file = str(temp_path / "input_video.mp4")
         output_file = str(temp_path / "output_video.mp4")
 
-        # دانلود ویدیو با yt-dlp
         download_media_with_ytdlp(data.video_url, video_file, is_audio_only=False)
 
-        # دانلود فایل‌های ویس
         audio_segments = []
         for i, (sub, url) in enumerate(zip(data.subtitles, data.audio_urls), start=1):
             start, end = parse_time_code(sub.time_code)
@@ -228,7 +230,6 @@ def handle_dubbing(data: DubbingRequest):
             download_file(url, audio_path)
             audio_segments.append({"start": start, "end": end, "file": str(audio_path)})
 
-        # پردازش و دابله
         process_and_merge_dubbing(video_file, audio_segments, output_file)
 
         return {
