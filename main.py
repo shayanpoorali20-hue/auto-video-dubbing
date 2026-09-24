@@ -40,22 +40,18 @@ def download_media_with_ytdlp(url: str, output_path: str, is_audio_only: bool = 
         'no_warnings': False,
         'nocheckcertificate': True,
         'geo_bypass': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['web', 'mweb']
+            }
+        }
     }
 
-    # چک کردن فایل کوکی
-    cookie_file = None
     if os.path.exists("cookies.txt"):
-        cookie_file = "cookies.txt"
-    elif os.path.exists("cookie.txt"):
-        cookie_file = "cookie.txt"
-
-    if cookie_file:
-        print(f"--- [DEBUG] Using cookie file: {cookie_file} ---")
-        ydl_opts['cookiefile'] = cookie_file
+        ydl_opts['cookiefile'] = "cookies.txt"
 
     if is_audio_only:
         ydl_opts.update({
-            # اولویت با بهترین کیفیت صدا، اگر نشد هر کیفیتی که صدا داشت
             'format': 'bestaudio/best/ba*',
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
@@ -70,7 +66,6 @@ def download_media_with_ytdlp(url: str, output_path: str, is_audio_only: bool = 
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
-
 # ---------------------------------------------------------------
 # توابع کمکی پردازش صدا و زمان‌بندی
 # ---------------------------------------------------------------
