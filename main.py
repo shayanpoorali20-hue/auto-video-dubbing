@@ -35,50 +35,54 @@ class ExtractAudioRequest(BaseModel):
 # تابع اصلی دانلود با yt-dlp
 # ---------------------------------------------------------------
 def download_media_with_ytdlp(url: str, output_path: str, is_audio_only: bool = False):
-    ydl_opts = {
-        'outtmpl': output_path,
-        'quiet': False,
-        'no_warnings': False,
-        'nocheckcertificate': True,
-        'geo_bypass': True,
-        # استفاده از کلاینت اندروید و آیفون به جای مرورگر وب
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'ios']
-            }
-        }
-    }
-
-    # خواندن فایل کوکی در صورت وجود
-    cookie_file = None
-    if os.path.exists("cookies.txt"):
-        cookie_file = "cookies.txt"
-    elif os.path.exists("cookie.txt"):
-        cookie_file = "cookie.txt"
-
-    if cookie_file:
-        print(f"--- [DEBUG] Using cookie file: {cookie_file} ---")
-        ydl_opts['cookiefile'] = cookie_file
-    else:
-        print("--- [WARNING] No cookie file found! ---")
-
     if is_audio_only:
-        ydl_opts.update({
+        # برای استخراج صدا از کلاینت اندروید بدون کوکی استفاده می‌کنیم تا محدودیت ۴۲۹ دور زده شود
+        ydl_opts = {
+            'outtmpl': output_path,
+            'quiet': False,
+            'no_warnings': False,
+            'nocheckcertificate': True,
+            'geo_bypass': True,
             'format': 'bestaudio/best',
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'web']
+                }
+            },
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'wav',
                 'preferredquality': '192',
             }],
-        })
+        }
     else:
-        ydl_opts.update({
+        # برای ویدیو کامل از تنظیمات با کوکی استفاده می‌کنیم
+        ydl_opts = {
+            'outtmpl': output_path,
+            'quiet': False,
+            'no_warnings': False,
+            'nocheckcertificate': True,
+            'geo_bypass': True,
             'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        })
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['web_safari', 'web_embedded']
+                }
+            }
+        }
+        
+        cookie_file = None
+        if os.path.exists("cookies.txt"):
+            cookie_file = "cookies.txt"
+        elif os.path.exists("cookie.txt"):
+            cookie_file = "cookie.txt"
+
+        if cookie_file:
+            print(f"--- [DEBUG] Using cookie file for video: {cookie_file} ---")
+            ydl_opts['cookiefile'] = cookie_file
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
-
 # ---------------------------------------------------------------
 # توابع پردازش صدا و زمان‌بندی FFmpeg
 # ---------------------------------------------------------------
