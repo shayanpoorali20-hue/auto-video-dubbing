@@ -42,7 +42,7 @@ def download_media_with_ytdlp(url: str, output_path: str, is_audio_only: bool = 
         'geo_bypass': True,
     }
 
-    # خواندن فایل کوکی در صورت وجود
+    # خواندن فایل کوکی
     cookie_file = None
     if os.path.exists("cookies.txt"):
         cookie_file = "cookies.txt"
@@ -71,7 +71,6 @@ def download_media_with_ytdlp(url: str, output_path: str, is_audio_only: bool = 
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
-
 
 # ---------------------------------------------------------------
 # توابع کمکی پردازش صدا و زمان‌بندی
