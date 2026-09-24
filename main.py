@@ -1,13 +1,13 @@
-import json
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-import requests
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
+import requests
+import yt_dlp
 
 app = FastAPI(title="Auto Dubbing Video Editor")
 
@@ -26,11 +26,43 @@ class DubbingRequest(BaseModel):
     audio_urls: list[str]
 
 
+class ExtractAudioRequest(BaseModel):
+    video_url: str
+
+
+# ---------------------------------------------------------------
+# توابع کمکی دانلود با yt-dlp
+# ---------------------------------------------------------------
+def download_media_with_ytdlp(url: str, output_path: str, is_audio_only: bool = False):
+    """دانلود ویدیو یا صوت از یوتیوب/اینستاگرام بدون خطای 403"""
+    ydl_opts = {
+        'outtmpl': output_path,
+        'quiet': True,
+        'no_warnings': True,
+    }
+    
+    if is_audio_only:
+        ydl_opts.update({
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'wav',
+                'preferredquality': '192',
+            }],
+        })
+    else:
+        ydl_opts.update({
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        })
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+
+
 # ---------------------------------------------------------------
 # توابع کمکی پردازش صدا و زمان‌بندی
 # ---------------------------------------------------------------
 def get_audio_duration(file_path):
-    """طول فایل صوتی رو با ffmpeg می‌خونه."""
     if not os.path.isfile(file_path):
         raise FileNotFoundError(f"فایل پیدا نشد: {file_path}")
 
@@ -57,7 +89,6 @@ def build_atempo_chain(speed):
 
 
 def parse_time_code(tc):
-    """'[00:15 - 00:26]' → (15.0, 26.0)"""
     m = re.match(r"\[\s*(\d+):(\d+)\s*-\s*(\d+):(\d+)\s*\]", tc)
     if not m:
         raise ValueError(f"فرمت time_code نامعتبر است: {tc}")
@@ -65,15 +96,7 @@ def parse_time_code(tc):
     return float(m1 * 60 + s1), float(m2 * 60 + s2)
 
 
-def adjust_audio_speed(
-    input_audio,
-    output_audio,
-    target_duration,
-    min_speed=0.7,
-    max_speed=3.0,
-    fade=0.15,
-):
-    """تنظیم سرعت صدا با rubberband و اضافه کردن fade out"""
+def adjust_audio_speed(input_audio, output_audio, target_duration, min_speed=0.7, max_speed=3.0, fade=0.15):
     current = get_audio_duration(input_audio)
     raw_speed = current / target_duration
     speed = max(min_speed, min(raw_speed, max_speed))
@@ -87,32 +110,16 @@ def adjust_audio_speed(
     filter_str = f"{speed_filter},afade=t=out:st={fade_start:.3f}:d={fade:.3f}"
 
     cmd = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        input_audio,
-        "-filter:a",
-        filter_str,
-        "-t",
-        f"{target_duration:.3f}",
-        "-ar",
-        "44100",
-        "-ac",
-        "2",
-        "-c:a",
-        "pcm_s16le",
-        output_audio,
+        "ffmpeg", "-y", "-i", input_audio,
+        "-filter:a", filter_str,
+        "-t", f"{target_duration:.3f}",
+        "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le",
+        output_audio
     ]
-    subprocess.run(
-        cmd,
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def process_and_merge_dubbing(video_path, audio_segments, output_path):
-    """میکس کامل قطعات صوتی روی ویدیو"""
     processed = []
 
     for i, seg in enumerate(audio_segments):
@@ -128,10 +135,7 @@ def process_and_merge_dubbing(video_path, audio_segments, output_path):
         inputs += ["-i", item["file"]]
         delay_ms = int(round(item["start"] * 1000))
         filter_parts.append(
-            f"[{i+1}:a]"
-            f"aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
-            f"adelay={delay_ms}:all=1"
-            f"[a{i}]"
+            f"[{i+1}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,adelay={delay_ms}:all=1[a{i}]"
         )
 
     mix_inputs = "".join(f"[a{i}]" for i in range(len(processed)))
@@ -141,23 +145,11 @@ def process_and_merge_dubbing(video_path, audio_segments, output_path):
     filter_complex = ";".join(filter_parts)
 
     cmd = [
-        "ffmpeg",
-        "-y",
-        *inputs,
-        "-filter_complex",
-        filter_complex,
-        "-map",
-        "0:v",
-        "-map",
-        "[aout]",
-        "-c:v",
-        "copy",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        "-shortest",
-        output_path,
+        "ffmpeg", "-y", *inputs,
+        "-filter_complex", filter_complex,
+        "-map", "0:v", "-map", "[aout]",
+        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+        "-shortest", output_path
     ]
     subprocess.run(cmd, check=True)
 
@@ -166,9 +158,6 @@ def process_and_merge_dubbing(video_path, audio_segments, output_path):
             os.remove(item["file"])
 
 
-# ---------------------------------------------------------------
-# دانلود فایل‌ها از لینک
-# ---------------------------------------------------------------
 def download_file(url, save_path):
     response = requests.get(url, stream=True)
     if response.status_code == 200:
@@ -176,58 +165,66 @@ def download_file(url, save_path):
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
     else:
-        raise HTTPException(
-            status_code=400, detail=f"خطا در دانلود فایل از لینک: {url}"
-        )
+        raise HTTPException(status_code=400, detail=f"خطا در دانلود فایل: {url}")
 
 
 # ---------------------------------------------------------------
-# تارگت اصلی API برای n8n
+# اندپوینت‌های اصلی API
 # ---------------------------------------------------------------
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "Dubbing API is running successfully!"}
+    return {"status": "ok", "message": "Dubbing API with yt-dlp is running!"}
 
 
+# ۱. استخراج مستقیم فایل صوتی برای Gemini
+@app.post("/get-audio-for-gemini")
+def get_audio_for_gemini(data: ExtractAudioRequest):
+    temp_dir = tempfile.mkdtemp()
+    output_wav = os.path.join(temp_dir, "extracted_audio")
+    
+    try:
+        download_media_with_ytdlp(data.video_url, output_wav, is_audio_only=True)
+        final_wav_path = output_wav + ".wav"
+        
+        if not os.path.exists(final_wav_path):
+            raise HTTPException(status_code=500, detail="استخراج فایل صوتی ناموفق بود.")
+            
+        return FileResponse(
+            path=final_wav_path,
+            filename="audio.wav",
+            media_type="audio/wav"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ۲. پردازش و میکس نهایی دابله
 @app.post("/process-dubbing")
 def handle_dubbing(data: DubbingRequest):
     if len(data.subtitles) != len(data.audio_urls):
-        raise HTTPException(
-            status_code=400,
-            detail="تعداد فایل‌های صوتی با تعداد خطوط زیرنویس برابر نیست!",
-        )
+        raise HTTPException(status_code=400, detail="تعداد ویس‌ها با تعداد زیرنویس‌ها برابر نیست!")
 
-    # ایجاد یک پوشه موقت برای ذخیره فایل‌های این درخواست
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
-        video_file = temp_path / "input_video.mp4"
-        output_file = temp_path / "output_video.mp4"
+        video_file = str(temp_path / "input_video.mp4")
+        output_file = str(temp_path / "output_video.mp4")
 
-        # ۱. دانلود ویدیوی اصلی
-        download_file(data.video_url, video_file)
+        # دانلود ویدیو با yt-dlp
+        download_media_with_ytdlp(data.video_url, video_file, is_audio_only=False)
 
-        # ۲. دانلود فایل‌های صوتی و ساخت لیست قطعات
+        # دانلود فایل‌های ویس
         audio_segments = []
-        for i, (sub, url) in enumerate(
-            zip(data.subtitles, data.audio_urls), start=1
-        ):
+        for i, (sub, url) in enumerate(zip(data.subtitles, data.audio_urls), start=1):
             start, end = parse_time_code(sub.time_code)
             audio_path = temp_path / f"audio_{i}.wav"
             download_file(url, audio_path)
+            audio_segments.append({"start": start, "end": end, "file": str(audio_path)})
 
-            audio_segments.append(
-                {"start": start, "end": end, "file": str(audio_path)}
-            )
+        # پردازش و دابله
+        process_and_merge_dubbing(video_file, audio_segments, output_file)
 
-        # ۳. پردازش و میکس صدا روی ویدیو
-        process_and_merge_dubbing(
-            str(video_file), audio_segments, str(output_file)
-        )
-
-        # در نسخه نهایی اینجا ویدیو روی S3/Cloudinary آپلود شده و لینک داده می‌شود.
-        # فعلا تاییدیه موفقیت را بازمی‌گردانیم
         return {
             "status": "success",
-            "message": "ویدیو با موفقیت سینک و رندر شد.",
-            "processed_segments": len(audio_segments),
+            "message": "ویدیو با موفقیت رندر شد.",
+            "processed_segments": len(audio_segments)
         }
