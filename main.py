@@ -48,6 +48,9 @@ def download_media_with_ytdlp(url: str, output_path: str, is_audio_only: bool = 
         }
     }
 
+    if os.path.exists("cookies.txt"):
+    ydl_opts['cookiefile'] = "cookies.txt"
+
     if is_audio_only:
         ydl_opts.update({
             'format': 'bestaudio/best/ba*',
