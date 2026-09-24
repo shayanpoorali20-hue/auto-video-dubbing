@@ -1,5 +1,6 @@
 fastapi
 uvicorn
-yt-dlp
 requests
 pydantic
+yt-dlp
+yt-dlp-get-pot
