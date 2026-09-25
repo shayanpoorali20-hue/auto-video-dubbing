@@ -1,5 +1,4 @@
 fastapi
 uvicorn
 yt-dlp
-requests
-pydantic
+python-multipart
