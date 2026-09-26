@@ -111,7 +111,7 @@ def health_check():
 
 @app.post("/get-audio-for-gemini")
 def get_audio_for_gemini(data: dict):
-    """گرفتن لینک اینستاگرام، دانلود ویدیو اولیه و تحویل فایل wav به Gemini"""
+    """گرفتن لینک اینستاگرام، پاک کردن فایل‌های قبلی، دانلود و تحویل فایل wav جدید به Gemini"""
     video_url = data.get("video_url")
     if not video_url:
         raise HTTPException(status_code=400, detail="video_url ارسال نشده است.")
@@ -119,9 +119,17 @@ def get_audio_for_gemini(data: dict):
     temp_video_path = os.path.join(TEMP_DIR, "original_video.mp4")
     final_wav_path = os.path.join(TEMP_DIR, "audio.wav")
 
+    # پاک کردن فایل‌های قبلی برای جلوگیری از تحویل فایل تکراری (Cache)
+    if os.path.exists(temp_video_path):
+        os.remove(temp_video_path)
+    if os.path.exists(final_wav_path):
+        os.remove(final_wav_path)
+
     try:
+        # دانلود ویدیوی جدید از لینک اینستاگرام
         download_media(video_url, temp_video_path)
         
+        # استخراج فایل صوتی جدید
         cmd = [
             "ffmpeg", "-y", "-i", temp_video_path,
             "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2",
