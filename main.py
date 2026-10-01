@@ -69,28 +69,70 @@ def update_telegram_message(message_id: int, text: str):
 
 
 def send_telegram_video(video_path: str, caption: str):
-    """ارسال مستقیم فایل ویدیوی نهایی به تلگرام"""
+    """ارسال ویدیو به تلگرام با استفاده از urllib استاندارد پایتون"""
     if TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         return
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
-    
     if not os.path.exists(video_path):
         send_telegram_message(f"❌ ویدیو در مسیر یافت نشد: {video_path}")
         return
 
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
+    
+    # ساخت Multipart Form-Data برای ارسال فایل ویدیو
+    boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
+    headers = {'Content-Type': f'multipart/form-data; boundary={boundary}'}
+    
+    body = []
+    # chat_id
+    body.extend([
+        f'--{boundary}'.encode(),
+        'Content-Disposition: form-data; name="chat_id"'.encode(),
+        ''.encode(),
+        str(TELEGRAM_CHAT_ID).encode()
+    ])
+    # caption
+    body.extend([
+        f'--{boundary}'.encode(),
+        'Content-Disposition: form-data; name="caption"'.encode(),
+        ''.encode(),
+        caption.encode('utf-8')
+    ])
+    # parse_mode
+    body.extend([
+        f'--{boundary}'.encode(),
+        'Content-Disposition: form-data; name="parse_mode"'.encode(),
+        ''.encode(),
+        'HTML'.encode()
+    ])
+    # video file
+    with open(video_path, 'rb') as f:
+        video_bytes = f.read()
+    
+    filename = os.path.basename(video_path)
+    body.extend([
+        f'--{boundary}'.encode(),
+        f'Content-Disposition: form-data; name="video"; filename="{filename}"'.encode(),
+        'Content-Type: video/mp4'.encode(),
+        ''.encode(),
+        video_bytes
+    ])
+    body.append(f'--{boundary}--'.encode())
+    body.append(''.encode())
+    
+    payload = b'\r\n'.join(body)
+    req = urllib.request.Request(url, data=payload, headers=headers)
+
     try:
-        with open(video_path, 'rb') as video_file:
-            files = {'video': video_file}
-            data = {'chat_id': TELEGRAM_CHAT_ID, 'caption': caption, 'parse_mode': 'HTML'}
-            logging.info("در حال ارسال ویدیوی نهایی به تلگرام...")
-            res = requests.post(url, data=data, files=files, timeout=180).json()
+        logging.info("در حال آپلود ویدیوی نهایی به تلگرام...")
+        with urllib.request.urlopen(req, timeout=120) as response:
+            res = json.loads(response.read().decode())
             if res.get("ok"):
                 logging.info("ویدیو با موفقیت به تلگرام ارسال شد!")
             else:
-                send_telegram_message(f"❌ خطا در ارسال ویدیو: {res.get('description')}")
+                send_telegram_message(f"❌ تلگرام فایل را رد کرد: {res.get('description')}")
     except Exception as e:
         logging.error(f"خطا در ارسال ویدیو: {e}")
-        send_telegram_message(f"❌ خطای غیرمنتظره در ارسال فایل ویدیو: {e}")
+        send_telegram_message(f"❌ خطای آپلود ویدیو به تلگرام: {e}")
 
 
 # ---------------------------------------------------------------
