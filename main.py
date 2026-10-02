@@ -12,6 +12,9 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form, BackgroundTa
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import yt_dlp
+import json
+import urllib.request
+import urllib.error
 
 # تنظیمات Logging برای مشاهده دقیق جزئیات در Render
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
