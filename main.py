@@ -24,8 +24,8 @@ TEMP_DIR = tempfile.mkdtemp()
 # ==========================================
 # 🔑 اطلاعات تلگرام خودت را اینجا وارد کن
 # ==========================================
-TELEGRAM_BOT_TOKEN = "8291063125:AAHObys2HV7GrzzSTVxOd86eQvbpMsxN5Q0"  # توکن ربات تلگرام
-TELEGRAM_CHAT_ID = "-1003907392945"      # چت آیدی تلگرام شما
+TELEGRAM_BOT_TOKEN = "8956121858:AAF1ZQD-KCKSCbd-GOfGc2CziHpBFBONhxA"  # توکن ربات تلگرام
+TELEGRAM_CHAT_ID = "-5080371184"      # چت آیدی تلگرام شما
 
 
 class InitProjectRequest(BaseModel):
