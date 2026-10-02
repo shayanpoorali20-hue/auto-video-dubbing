@@ -6,15 +6,15 @@ import time
 import logging
 import tempfile
 import subprocess
-import requests
+import threading
+import urllib.request
+import urllib.error
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, BackgroundTasks
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import yt_dlp
-import json
-import urllib.request
-import urllib.error
+import requests
 
 # تنظیمات Logging برای مشاهده دقیق جزئیات در Render
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -24,11 +24,14 @@ app = FastAPI(title="Instagram Auto Dubbing Service")
 # پوشه موقت کاری برای کل پروژه
 TEMP_DIR = tempfile.mkdtemp()
 
+# قفل اختصاصی برای جلوگیری از اجرای همزمان چند رندر سنگین
+render_lock = threading.Lock()
+
 # ==========================================
-# 🔑 اطلاعات تلگرام خودت را اینجا وارد کن
+# 🔑 اطلاعات تلگرام (اصلاح‌شده)
 # ==========================================
-TELEGRAM_BOT_TOKEN = "8956121858:AAF1ZQD-KCKSCbd-GOfGc2CziHpBFBONhxA"  # توکن ربات تلگرام
-TELEGRAM_CHAT_ID = "-5080371184"      # چت آیدی تلگرام شما
+TELEGRAM_BOT_TOKEN = "8956121858:AAF1ZQD-KCKSCbd-GOfGc2CziHpBFBONhxA"
+TELEGRAM_CHAT_ID = "5080371184"  # علامت منفی (-) حذف شد
 
 
 class InitProjectRequest(BaseModel):
@@ -40,8 +43,8 @@ class InitProjectRequest(BaseModel):
 # توابع کمکی ارتباط با تلگرام
 # ---------------------------------------------------------------
 def send_telegram_message(text: str) -> int:
-    """ارسال یک پیام جدید به تلگرام و برگرداندن message_id برای ویرایش‌های بعدی"""
-    if TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+    """ارسال یک پیام جدید به تلگرام و برگرداندن message_id"""
+    if not TELEGRAM_BOT_TOKEN:
         return None
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
@@ -49,14 +52,16 @@ def send_telegram_message(text: str) -> int:
         res = requests.post(url, json=payload, timeout=10).json()
         if res.get("ok"):
             return res["result"]["message_id"]
+        else:
+            logging.error(f"خطای ارسال پیام تلگرام: {res.get('description')}")
     except Exception as e:
         logging.error(f"خطا در ارسال پیام به تلگرام: {e}")
     return None
 
 
 def update_telegram_message(message_id: int, text: str):
-    """ویرایش پیام لودینگ قبلی در تلگرام (برای نوار پیشرفت)"""
-    if not message_id or TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+    """ویرایش پیام لودینگ قبلی در تلگرام"""
+    if not message_id or not TELEGRAM_BOT_TOKEN:
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
     payload = {
@@ -72,77 +77,75 @@ def update_telegram_message(message_id: int, text: str):
 
 
 def send_telegram_video(video_path: str, caption: str):
-    """ارسال ویدیو به تلگرام با استفاده از urllib استاندارد پایتون"""
-    if TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        return
+    """ارسال فایل ویدیو به تلگرام و گزارش دقیق خطای احتمالی"""
     if not os.path.exists(video_path):
-        send_telegram_message(f"❌ ویدیو در مسیر یافت نشد: {video_path}")
+        send_telegram_message(f"❌ <b>خطا:</b> فایل ویدیو در مسیر زیر یافت نشد:\n<code>{video_path}</code>")
         return
 
+    file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
+    send_telegram_message(f"📦 <b>شروع آپلود ویدیو...</b>\nحجم فایل: {file_size_mb:.2f} مگابایت")
+
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
-    
-    # ساخت Multipart Form-Data برای ارسال فایل ویدیو
     boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
     headers = {'Content-Type': f'multipart/form-data; boundary={boundary}'}
     
-    body = []
-    # chat_id
-    body.extend([
-        f'--{boundary}'.encode(),
-        'Content-Disposition: form-data; name="chat_id"'.encode(),
-        ''.encode(),
-        str(TELEGRAM_CHAT_ID).encode()
-    ])
-    # caption
-    body.extend([
-        f'--{boundary}'.encode(),
-        'Content-Disposition: form-data; name="caption"'.encode(),
-        ''.encode(),
-        caption.encode('utf-8')
-    ])
-    # parse_mode
-    body.extend([
-        f'--{boundary}'.encode(),
-        'Content-Disposition: form-data; name="parse_mode"'.encode(),
-        ''.encode(),
-        'HTML'.encode()
-    ])
-    # video file
-    with open(video_path, 'rb') as f:
-        video_bytes = f.read()
-    
-    filename = os.path.basename(video_path)
-    body.extend([
-        f'--{boundary}'.encode(),
-        f'Content-Disposition: form-data; name="video"; filename="{filename}"'.encode(),
-        'Content-Type: video/mp4'.encode(),
-        ''.encode(),
-        video_bytes
-    ])
-    body.append(f'--{boundary}--'.encode())
-    body.append(''.encode())
-    
-    payload = b'\r\n'.join(body)
-    req = urllib.request.Request(url, data=payload, headers=headers)
-
     try:
-        logging.info("در حال آپلود ویدیوی نهایی به تلگرام...")
-        with urllib.request.urlopen(req, timeout=120) as response:
+        body = []
+        body.extend([
+            f'--{boundary}'.encode(),
+            'Content-Disposition: form-data; name="chat_id"'.encode(),
+            ''.encode(),
+            str(TELEGRAM_CHAT_ID).encode()
+        ])
+        body.extend([
+            f'--{boundary}'.encode(),
+            'Content-Disposition: form-data; name="caption"'.encode(),
+            ''.encode(),
+            caption.encode('utf-8')
+        ])
+        body.extend([
+            f'--{boundary}'.encode(),
+            'Content-Disposition: form-data; name="parse_mode"'.encode(),
+            ''.encode(),
+            'HTML'.encode()
+        ])
+        
+        with open(video_path, 'rb') as f:
+            video_bytes = f.read()
+        
+        filename = os.path.basename(video_path)
+        body.extend([
+            f'--{boundary}'.encode(),
+            f'Content-Disposition: form-data; name="video"; filename="{filename}"'.encode(),
+            'Content-Type: video/mp4'.encode(),
+            ''.encode(),
+            video_bytes
+        ])
+        body.append(f'--{boundary}--'.encode())
+        body.append(''.encode())
+        
+        payload = b'\r\n'.join(body)
+        req = urllib.request.Request(url, data=payload, headers=headers)
+
+        with urllib.request.urlopen(req, timeout=300) as response:
             res = json.loads(response.read().decode())
             if res.get("ok"):
-                logging.info("ویدیو با موفقیت به تلگرام ارسال شد!")
+                send_telegram_message("🚀 <b>ویدیو با موفقیت ارسال شد!</b>")
             else:
-                send_telegram_message(f"❌ تلگرام فایل را رد کرد: {res.get('description')}")
+                desc = res.get('description', 'خطای نامشخص')
+                send_telegram_message(f"❌ <b>تلگرام فایل را رد کرد:</b>\n<code>{desc}</code>")
+
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode()
+        send_telegram_message(f"❌ <b>خطای HTTP تلگرام:</b> {e.code}\n<code>{error_body}</code>")
     except Exception as e:
-        logging.error(f"خطا در ارسال ویدیو: {e}")
-        send_telegram_message(f"❌ خطای آپلود ویدیو به تلگرام: {e}")
+        send_telegram_message(f"❌ <b>خطای غیرمنتظره هنگام آپلود:</b>\n<code>{str(e)}</code>")
 
 
 # ---------------------------------------------------------------
-# توابع کمکی دانلود و FFmpeg (کد خودت)
+# توابع کمکی دانلود و FFmpeg
 # ---------------------------------------------------------------
 def download_media(url: str, output_path: str):
-    """دانلود مستقیم ویدیو از اینستاگرام"""
     ydl_opts = {
         'outtmpl': output_path,
         'quiet': False,
@@ -222,10 +225,12 @@ def adjust_audio_speed(input_audio, output_audio, target_duration, min_speed=0.7
 # تابع پردازش اصلی رندر در پس‌زمینه
 # ---------------------------------------------------------------
 def background_dubbing_process():
-    """پروسه سنگین ادیت، تنظیم سرعت، میکس FFmpeg و ارسال خروجی به تلگرام"""
+    # اگر رندر دیگری فعال است، اجرا نکن
+    if not render_lock.acquire(blocking=False):
+        logging.warning("یک پروسه رندر دیگر در حال اجراست. درخواست همزمان لغو شد.")
+        return
+
     start_time = time.time()
-    
-    # پیام اولیه در تلگرام
     msg_id = send_telegram_message("⏳ <b>شروع پروسه رندر ویدیو...</b>\nدر حال تایید و خواندن فایل‌ها...")
 
     try:
@@ -234,7 +239,7 @@ def background_dubbing_process():
         output_path = os.path.join(TEMP_DIR, "final_dubbed_video.mp4")
 
         if not os.path.exists(video_path) or not os.path.exists(sub_path):
-            raise Exception("فایل ویدیو یا زیرنویس اصلی پیدا نشد.")
+            raise Exception("فایل ویدیو یا زیرنویس اصلی در TEMP_DIR پیدا نشد.")
 
         with open(sub_path, "r", encoding="utf-8") as f:
             subtitles = json.load(f)
@@ -263,7 +268,7 @@ def background_dubbing_process():
 
         # مرحله ۲: ترکیب فایل‌های صوتی با FFmpeg
         elapsed = round(time.time() - start_time, 1)
-        update_telegram_message(msg_id, f"🎬 <b>در حال رندر و سینک صوتی روی ویدیو (FFmpeg)...</b>\nاین مرحله ممکنه ۲ تا ۵ دقیقه طول بکشه.\n⏱ زمان طی شده: {elapsed} ثانیه\n[██████░░░░] 60%")
+        update_telegram_message(msg_id, f"🎬 <b>در حال رندر و سینک صوتی روی ویدیو (FFmpeg)...</b>\n⏱ زمان طی شده: {elapsed} ثانیه\n[██████░░░░] 60%")
         logging.info("مرحله ۲: شروع فرمان FFmpeg filter_complex")
 
         inputs = ["-i", video_path]
@@ -293,7 +298,7 @@ def background_dubbing_process():
 
         # مرحله ۳: اتمام و ارسال
         total_time = round(time.time() - start_time, 1)
-        update_telegram_message(msg_id, f"🚀 <b>رندر با موفقیت انجام شد!</b>\n⏱ زمان کل ساخت: {total_time} ثانیه\nدر حال آپلود ویدیو در تلگرام...")
+        update_telegram_message(msg_id, f"✨ <b>رندر با موفقیت انجام شد!</b>\n⏱ زمان کل رندر: {total_time} ثانیه\nدر حال ارسال فایل...")
         
         caption = f"✨ <b>ویدیوی دوبله‌شده آماده شد!</b>\n⏱ زمان ساخت: {total_time} ثانیه"
         send_telegram_video(output_path, caption)
@@ -302,6 +307,8 @@ def background_dubbing_process():
         total_time = round(time.time() - start_time, 1)
         logging.error(f"❌ خطا در رندر: {str(e)}")
         update_telegram_message(msg_id, f"❌ <b>خطا در پردازش ویدیو!</b>\nمتن خطا: <code>{str(e)}</code>\n⏱ زمان طی شده: {total_time} ثانیه")
+    finally:
+        render_lock.release()
 
 
 # ---------------------------------------------------------------
@@ -315,7 +322,6 @@ def health_check():
 
 @app.post("/get-audio-for-gemini")
 def get_audio_for_gemini(data: dict):
-    """گرفتن لینک اینستاگرام، پاک کردن فایل‌های قبلی، دانلود و تحویل فایل wav جدید به Gemini"""
     video_url = data.get("video_url")
     if not video_url:
         raise HTTPException(status_code=400, detail="video_url ارسال نشده است.")
@@ -345,7 +351,6 @@ def get_audio_for_gemini(data: dict):
 
 @app.post("/init-project")
 def init_project(data: InitProjectRequest):
-    """مرحله ۱: ذخیره دیتای زیرنویس JSON و اطمینان از دانلود ویدیو اصلی"""
     try:
         video_path = os.path.join(TEMP_DIR, "original_video.mp4")
         if not os.path.exists(video_path):
@@ -362,7 +367,6 @@ def init_project(data: InitProjectRequest):
 
 @app.post("/upload-audio")
 async def upload_audio(line_index: int = Form(...), file: UploadFile = File(...)):
-    """مرحله ۲: دریافت تک‌تک فایل‌های صوتی از n8n در طول لوپ"""
     try:
         audio_path = os.path.join(TEMP_DIR, f"audio_line_{line_index}.wav")
         with open(audio_path, "wb") as buffer:
@@ -375,10 +379,6 @@ async def upload_audio(line_index: int = Form(...), file: UploadFile = File(...)
 
 @app.post("/process-dubbing")
 def process_dubbing(background_tasks: BackgroundTasks):
-    """
-    مرحله ۳: انتهای کار؛ بلافاصله 200 OK می‌دهد تا n8n ارور ۵۰۲ نگیرد،
-    و پروسه ادیت و ارسال ویدیو را در پس‌زمینه سرور اجرا می‌کند.
-    """
     background_tasks.add_task(background_dubbing_process)
     
     return {
