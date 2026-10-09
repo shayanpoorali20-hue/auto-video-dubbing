@@ -16,34 +16,118 @@ from pydantic import BaseModel
 import yt_dlp
 import requests
 
-# تنظیمات Logging برای مشاهده دقیق جزئیات در Render
+# ==========================================================
+# 📚 کتابخانه‌های پردازش صدا
+# ==========================================================
+import numpy as np
+import soundfile as sf
+import noisereduce as nr
+
+# nara_wpe اختیاری است (ممکن است روی Render نصب نشود)
+try:
+    from nara_wpe import wpe as nara_wpe_fn
+    NARA_WPE_AVAILABLE = True
+except Exception:
+    try:
+        from nara_wpe.wpe import wpe as nara_wpe_fn
+        NARA_WPE_AVAILABLE = True
+    except Exception:
+        nara_wpe_fn = None
+        NARA_WPE_AVAILABLE = False
+
+# pedalboard اختیاری است
+try:
+    from pedalboard import Pedalboard, NoiseGate, Compressor, Reverb, Limiter
+    from pedalboard.io import AudioFile
+    PEDALBOARD_AVAILABLE = True
+except Exception:
+    PEDALBOARD_AVAILABLE = False
+
+
+# ==========================================================
+# ⚙️ تنظیمات Logging
+# ==========================================================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+if not NARA_WPE_AVAILABLE:
+    logging.warning("nara_wpe در دسترس نیست — مرحله De-reverb رد می‌شود.")
+if not PEDALBOARD_AVAILABLE:
+    logging.warning("pedalboard در دسترس نیست — مرحله افکت‌ها رد می‌شود.")
 
-app = FastAPI(title="Instagram Auto Dubbing Service")
 
-# پوشه موقت کاری برای کل پروژه
-TEMP_DIR = tempfile.mkdtemp()
+# ==========================================================
+# 🎛️ پارامترهای قابل تنظیم پردازش صدا
+# ==========================================================
+# --- Noisereduce ---
+NR_STATIONARY          = False
+NR_PROP_DECREASE       = 0.7    # شدت حذف نویز (0.0 تا 1.0) - برای TTS کم بگذار
+NR_STD_THRESH          = 1.5    # آستانه انحراف معیار
+NR_N_FFT               = 1024
+NR_WIN_LENGTH          = 256
+NR_FREQ_SMOOTH_HZ      = 50
+NR_TIME_SMOOTH_MS      = 32
+NR_TIME_CONSTANT_S     = 0.5
 
-# قفل اختصاصی برای جلوگیری از اجرای همزمان چند رندر سنگین
-render_lock = threading.Lock()
+# --- Nara_wpe (De-reverb) ---
+WPE_TAPS               = 10
+WPE_DELAY              = 3
+WPE_ITERATIONS         = 5
+WPE_PSD_CONTEXT        = 0
+WPE_STATISTICS_MODE    = "full"
 
-# ==========================================
-# 🔑 اطلاعات تلگرام (اصلاح‌شده)
-# ==========================================
+# --- Speed change (Rubberband) ---
+SPEED_MIN              = 0.7
+SPEED_MAX              = 3.0
+SPEED_FADE_SECONDS     = 0.05   # فید انتهایی کوتاه برای جلوگیری از خش
+
+# --- Pedalboard Effects ---
+GATE_THRESHOLD_DB      = -40.0
+GATE_RATIO             = 2.0
+GATE_ATTACK_MS         = 5.0
+GATE_RELEASE_MS        = 100.0
+
+COMP_THRESHOLD_DB      = -18.0
+COMP_RATIO             = 4.0
+COMP_ATTACK_MS         = 5.0
+COMP_RELEASE_MS        = 250.0
+
+REVERB_ROOM_SIZE       = 0.2
+REVERB_DAMPING         = 0.5
+REVERB_WET_LEVEL       = 0.08   # خیلی کم — چون WPE قبلاً کار کرده
+REVERB_WIDTH           = 0.5
+
+LIMITER_THRESHOLD_DB   = -1.0
+LIMITER_RELEASE_MS     = 100.0
+
+# --- Final mix ---
+LOUDNORM_I             = -16.0
+LOUDNORM_TP            = -1.5
+LOUDNORM_LRA           = 11.0
+
+
+# ==========================================================
+# 🔑 اطلاعات تلگرام
+# ==========================================================
 TELEGRAM_BOT_TOKEN = "8956121858:AAF1ZQD-KCKSCbd-GOfGc2CziHpBFBONhxA"
-TELEGRAM_CHAT_ID = "5080371184"  # علامت منفی (-) حذف شد
+TELEGRAM_CHAT_ID   = "5080371184"
+
+
+# ==========================================================
+# 🚀 اپلیکیشن FastAPI
+# ==========================================================
+app = FastAPI(title="Instagram Auto Dubbing Service")
+TEMP_DIR = tempfile.mkdtemp()
+render_lock = threading.Lock()
 
 
 class InitProjectRequest(BaseModel):
     video_url: str
-    subtitles: list  # آرایه‌ای از تایم‌کدها و متن‌ها
+    subtitles: list
 
 
-# ---------------------------------------------------------------
-# توابع کمکی ارتباط با تلگرام
-# ---------------------------------------------------------------
+# ==========================================================
+# 📨 توابع تلگرام
+# ==========================================================
 def send_telegram_message(text: str) -> int:
-    """ارسال یک پیام جدید به تلگرام و برگرداندن message_id"""
     if not TELEGRAM_BOT_TOKEN:
         return None
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -52,15 +136,13 @@ def send_telegram_message(text: str) -> int:
         res = requests.post(url, json=payload, timeout=10).json()
         if res.get("ok"):
             return res["result"]["message_id"]
-        else:
-            logging.error(f"خطای ارسال پیام تلگرام: {res.get('description')}")
+        logging.error(f"خطای ارسال پیام تلگرام: {res.get('description')}")
     except Exception as e:
         logging.error(f"خطا در ارسال پیام به تلگرام: {e}")
     return None
 
 
 def update_telegram_message(message_id: int, text: str):
-    """ویرایش پیام لودینگ قبلی در تلگرام"""
     if not message_id or not TELEGRAM_BOT_TOKEN:
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
@@ -68,7 +150,7 @@ def update_telegram_message(message_id: int, text: str):
         "chat_id": TELEGRAM_CHAT_ID,
         "message_id": message_id,
         "text": text,
-        "parse_mode": "HTML"
+        "parse_mode": "HTML",
     }
     try:
         requests.post(url, json=payload, timeout=10)
@@ -77,54 +159,53 @@ def update_telegram_message(message_id: int, text: str):
 
 
 def send_telegram_video(video_path: str, caption: str):
-    """ارسال فایل ویدیو به تلگرام و گزارش دقیق خطای احتمالی"""
     if not os.path.exists(video_path):
-        send_telegram_message(f"❌ <b>خطا:</b> فایل ویدیو در مسیر زیر یافت نشد:\n<code>{video_path}</code>")
+        send_telegram_message(f"❌ <b>خطا:</b> فایل ویدیو یافت نشد:\n<code>{video_path}</code>")
         return
 
     file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
-    send_telegram_message(f"📦 <b>شروع آپلود ویدیو...</b>\nحجم فایل: {file_size_mb:.2f} مگابایت")
+    send_telegram_message(f"📦 <b>شروع آپلود ویدیو...</b>\nحجم: {file_size_mb:.2f} مگابایت")
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
-    boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
-    headers = {'Content-Type': f'multipart/form-data; boundary={boundary}'}
-    
+    boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
+    headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+
     try:
         body = []
         body.extend([
-            f'--{boundary}'.encode(),
-            'Content-Disposition: form-data; name="chat_id"'.encode(),
-            ''.encode(),
-            str(TELEGRAM_CHAT_ID).encode()
+            f"--{boundary}".encode(),
+            b'Content-Disposition: form-data; name="chat_id"',
+            b"",
+            str(TELEGRAM_CHAT_ID).encode(),
         ])
         body.extend([
-            f'--{boundary}'.encode(),
-            'Content-Disposition: form-data; name="caption"'.encode(),
-            ''.encode(),
-            caption.encode('utf-8')
+            f"--{boundary}".encode(),
+            b'Content-Disposition: form-data; name="caption"',
+            b"",
+            caption.encode("utf-8"),
         ])
         body.extend([
-            f'--{boundary}'.encode(),
-            'Content-Disposition: form-data; name="parse_mode"'.encode(),
-            ''.encode(),
-            'HTML'.encode()
+            f"--{boundary}".encode(),
+            b'Content-Disposition: form-data; name="parse_mode"',
+            b"",
+            b"HTML",
         ])
-        
-        with open(video_path, 'rb') as f:
+
+        with open(video_path, "rb") as f:
             video_bytes = f.read()
-        
+
         filename = os.path.basename(video_path)
         body.extend([
-            f'--{boundary}'.encode(),
+            f"--{boundary}".encode(),
             f'Content-Disposition: form-data; name="video"; filename="{filename}"'.encode(),
-            'Content-Type: video/mp4'.encode(),
-            ''.encode(),
-            video_bytes
+            b"Content-Type: video/mp4",
+            b"",
+            video_bytes,
         ])
-        body.append(f'--{boundary}--'.encode())
-        body.append(''.encode())
-        
-        payload = b'\r\n'.join(body)
+        body.append(f"--{boundary}--".encode())
+        body.append(b"")
+
+        payload = b"\r\n".join(body)
         req = urllib.request.Request(url, data=payload, headers=headers)
 
         with urllib.request.urlopen(req, timeout=300) as response:
@@ -132,37 +213,33 @@ def send_telegram_video(video_path: str, caption: str):
             if res.get("ok"):
                 send_telegram_message("🚀 <b>ویدیو با موفقیت ارسال شد!</b>")
             else:
-                desc = res.get('description', 'خطای نامشخص')
-                send_telegram_message(f"❌ <b>تلگرام فایل را رد کرد:</b>\n<code>{desc}</code>")
+                send_telegram_message(f"❌ <b>تلگرام فایل را رد کرد:</b>\n<code>{res.get('description')}</code>")
 
     except urllib.error.HTTPError as e:
-        error_body = e.read().decode()
-        send_telegram_message(f"❌ <b>خطای HTTP تلگرام:</b> {e.code}\n<code>{error_body}</code>")
+        send_telegram_message(f"❌ <b>خطای HTTP تلگرام:</b> {e.code}\n<code>{e.read().decode()}</code>")
     except Exception as e:
         send_telegram_message(f"❌ <b>خطای غیرمنتظره هنگام آپلود:</b>\n<code>{str(e)}</code>")
 
 
-# ---------------------------------------------------------------
-# توابع کمکی دانلود و FFmpeg
-# ---------------------------------------------------------------
+# ==========================================================
+# 🎬 توابع کمکی پایه (دانلود، ffmpeg)
+# ==========================================================
 def download_media(url: str, output_path: str):
     ydl_opts = {
-        'outtmpl': output_path,
-        'quiet': False,
-        'no_warnings': False,
-        'nocheckcertificate': True,
-        'geo_bypass': True,
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        "outtmpl": output_path,
+        "quiet": False,
+        "no_warnings": False,
+        "nocheckcertificate": True,
+        "geo_bypass": True,
+        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
     }
-
     cookie_file = None
     if os.path.exists("cookies.txt"):
         cookie_file = "cookies.txt"
     elif os.path.exists("cookie.txt"):
         cookie_file = "cookie.txt"
-
     if cookie_file:
-        ydl_opts['cookiefile'] = cookie_file
+        ydl_opts["cookiefile"] = cookie_file
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
@@ -198,44 +275,218 @@ def parse_time_code(tc):
     return float(m1 * 60 + s1), float(m2 * 60 + s2)
 
 
-def adjust_audio_speed(input_audio, output_audio, target_duration, min_speed=0.7, max_speed=3.0, fade=0.15):
+# ==========================================================
+# 🔊 مراحل پردازش صدا
+# ==========================================================
+def stage_denoise(input_path: str, output_path: str) -> bool:
+    """مرحله ۱: حذف نویز با noisereduce"""
+    try:
+        data, rate = sf.read(input_path, dtype="float32")
+
+        def _reduce(y):
+            return nr.reduce_noise(
+                y=y,
+                sr=rate,
+                stationary=NR_STATIONARY,
+                prop_decrease=NR_PROP_DECREASE,
+                n_std_thresh_stationary=NR_STD_THRESH,
+                time_constant_s=NR_TIME_CONSTANT_S,
+                freq_mask_smooth_hz=NR_FREQ_SMOOTH_HZ,
+                time_mask_smooth_ms=NR_TIME_SMOOTH_MS,
+                n_fft=NR_N_FFT,
+                win_length=NR_WIN_LENGTH,
+                use_tqdm=False,
+            )
+
+        if data.ndim == 1:
+            cleaned = _reduce(data)
+        else:
+            cleaned = np.zeros_like(data)
+            for ch in range(data.shape[1]):
+                cleaned[:, ch] = _reduce(data[:, ch])
+
+        sf.write(output_path, cleaned, rate)
+        return True
+    except Exception as e:
+        logging.error(f"خطا در حذف نویز: {e}")
+        return False
+
+
+def stage_dereverb(input_path: str, output_path: str) -> bool:
+    """مرحله ۲: حذف ورب با nara_wpe (اختیاری)"""
+    if not NARA_WPE_AVAILABLE:
+        return False
+    try:
+        data, rate = sf.read(input_path, dtype="float32")
+        # nara_wpe نیاز به آرایه (channels, samples) دارد
+        if data.ndim == 1:
+            signal = data[np.newaxis, :]
+        else:
+            signal = data.T
+
+        dereverbed = nara_wpe_fn(
+            signal,
+            taps=WPE_TAPS,
+            delay=WPE_DELAY,
+            iterations=WPE_ITERATIONS,
+            psd_context=WPE_PSD_CONTEXT,
+            statistics_mode=WPE_STATISTICS_MODE,
+        )
+
+        # بازگشت به (samples,) یا (samples, channels)
+        if dereverbed.shape[0] == 1:
+            out = dereverbed[0]
+        else:
+            out = dereverbed.T
+
+        # جلوگیری از NaN و کلیپینگ
+        out = np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+        peak = np.max(np.abs(out)) or 1.0
+        if peak > 1.0:
+            out = out / peak
+
+        sf.write(output_path, out.astype(np.float32), rate)
+        return True
+    except Exception as e:
+        logging.error(f"خطا در حذف ورب: {e}")
+        return False
+
+
+def stage_speed_change(input_audio: str, output_audio: str, target_duration: float) -> None:
+    """مرحله ۳: تغییر سرعت با Rubberband + adeclick + fade"""
     current = get_audio_duration(input_audio)
     raw_speed = current / target_duration
-    speed = max(min_speed, min(raw_speed, max_speed))
+    speed = max(SPEED_MIN, min(raw_speed, SPEED_MAX))
 
     if 0.5 <= speed <= 2.0:
-        speed_filter = f"rubberband=tempo={speed:.6f}:pitch=1"
+        speed_filter = f"rubberband=tempo={speed:.6f}:pitch=1:formant=1:pitchq=quality"
     else:
         speed_filter = build_atempo_chain(speed)
 
+    fade = SPEED_FADE_SECONDS
     fade_start = max(0.0, target_duration - fade)
-    filter_str = f"{speed_filter},afade=t=out:st={fade_start:.3f}:d={fade:.3f}"
+    filter_str = f"{speed_filter},adeclick,afade=t=out:st={fade_start:.3f}:d={fade:.3f}"
 
     cmd = [
         "ffmpeg", "-y", "-i", input_audio,
         "-filter:a", filter_str,
         "-t", f"{target_duration:.3f}",
         "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le",
-        output_audio
+        output_audio,
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-# ---------------------------------------------------------------
-# تابع پردازش اصلی رندر در پس‌زمینه
-# ---------------------------------------------------------------
+def stage_effects(input_path: str, output_path: str) -> bool:
+    """مرحله ۴: افکت‌های نهایی با pedalboard (اختیاری)"""
+    if not PEDALBOARD_AVAILABLE:
+        return False
+    try:
+        board = Pedalboard([
+            NoiseGate(
+                threshold_db=GATE_THRESHOLD_DB,
+                ratio=GATE_RATIO,
+                attack_ms=GATE_ATTACK_MS,
+                release_ms=GATE_RELEASE_MS,
+            ),
+            Compressor(
+                threshold_db=COMP_THRESHOLD_DB,
+                ratio=COMP_RATIO,
+                attack_ms=COMP_ATTACK_MS,
+                release_ms=COMP_RELEASE_MS,
+            ),
+            Reverb(
+                room_size=REVERB_ROOM_SIZE,
+                damping=REVERB_DAMPING,
+                wet_level=REVERB_WET_LEVEL,
+                width=REVERB_WIDTH,
+            ),
+            Limiter(
+                threshold_db=LIMITER_THRESHOLD_DB,
+                release_ms=LIMITER_RELEASE_MS,
+            ),
+        ])
+
+        with AudioFile(input_path) as f:
+            audio = f.read(f.frames)
+            sr = f.samplerate
+
+        effected = board.process(audio, sr)
+
+        with AudioFile(output_path, "w", sr) as f:
+            f.write(effected)
+
+        return True
+    except Exception as e:
+        logging.error(f"خطا در اعمال افکت‌ها: {e}")
+        return False
+
+
+def enhance_audio_pipeline(raw_audio: str, final_audio: str, target_duration: float, idx: int) -> None:
+    """
+    Pipeline کامل روی یک فایل صوتی:
+      raw_audio → [denoise] → [dereverb] → [speed change] → [effects] → final_audio
+    طول نهایی دقیقاً برابر target_duration است.
+    """
+    current = raw_audio
+    temp_files_to_cleanup = []
+
+    # ۱. حذف نویز
+    p1 = os.path.join(TEMP_DIR, f"tmp_{idx}_denoise.wav")
+    if stage_denoise(current, p1):
+        current = p1
+        temp_files_to_cleanup.append(p1)
+    else:
+        logging.info(f"[خط {idx}] حذف نویز رد شد.")
+
+    # ۲. حذف ورب
+    p2 = os.path.join(TEMP_DIR, f"tmp_{idx}_dereverb.wav")
+    if stage_dereverb(current, p2):
+        current = p2
+        temp_files_to_cleanup.append(p2)
+    else:
+        logging.info(f"[خط {idx}] حذف ورب رد شد.")
+
+    # ۳. تغییر سرعت (خروجی: exact target_duration، 44100 stereo)
+    p3 = os.path.join(TEMP_DIR, f"tmp_{idx}_speed.wav")
+    stage_speed_change(current, p3, target_duration)
+    current = p3
+    temp_files_to_cleanup.append(p3)
+
+    # ۴. افکت‌های نهایی
+    p4 = os.path.join(TEMP_DIR, f"tmp_{idx}_effects.wav")
+    if stage_effects(current, p4):
+        current = p4
+        temp_files_to_cleanup.append(p4)
+    else:
+        logging.info(f"[خط {idx}] افکت‌ها رد شدند.")
+
+    # کپی نهایی
+    shutil.copy(current, final_audio)
+
+    # پاکسازی فایل‌های میانی
+    for f in temp_files_to_cleanup:
+        try:
+            if os.path.exists(f):
+                os.remove(f)
+        except Exception:
+            pass
+
+
+# ==========================================================
+# 🎥 پردازش اصلی رندر (Background)
+# ==========================================================
 def background_dubbing_process():
-    # اگر رندر دیگری فعال است، اجرا نکن
     if not render_lock.acquire(blocking=False):
-        logging.warning("یک پروسه رندر دیگر در حال اجراست. درخواست همزمان لغو شد.")
+        logging.warning("یک رندر دیگر فعال است. درخواست لغو شد.")
         return
 
     start_time = time.time()
-    msg_id = send_telegram_message("⏳ <b>شروع پروسه رندر ویدیو...</b>\nدر حال تایید و خواندن فایل‌ها...")
+    msg_id = send_telegram_message("⏳ <b>شروع پروسه رندر ویدیو...</b>\nدر حال خواندن فایل‌ها...")
 
     try:
-        video_path = os.path.join(TEMP_DIR, "original_video.mp4")
-        sub_path = os.path.join(TEMP_DIR, "subtitles.json")
+        video_path  = os.path.join(TEMP_DIR, "original_video.mp4")
+        sub_path    = os.path.join(TEMP_DIR, "subtitles.json")
         output_path = os.path.join(TEMP_DIR, "final_dubbed_video.mp4")
 
         if not os.path.exists(video_path) or not os.path.exists(sub_path):
@@ -244,32 +495,66 @@ def background_dubbing_process():
         with open(sub_path, "r", encoding="utf-8") as f:
             subtitles = json.load(f)
 
-        # مرحله ۱: تنظیم سرعت ویس‌ها
-        elapsed = round(time.time() - start_time, 1)
-        update_telegram_message(msg_id, f"🎙 <b>در حال تنظیم سرعت ویس‌ها (Rubberband)...</b>\n⏱ زمان طی شده: {elapsed} ثانیه\n[███░░░░░░░] 30%")
-        logging.info("مرحله ۱: تنظیم سرعت تک‌تک ویس‌ها")
+        total_lines = len(subtitles)
 
+        # ---------- مرحله ۱: پردازش خط به خط ----------
+        logging.info("مرحله ۱: پردازش کامل هر خط صوتی")
         audio_segments = []
+
         for i, sub in enumerate(subtitles):
             raw_audio = os.path.join(TEMP_DIR, f"audio_line_{i}.wav")
             if not os.path.exists(raw_audio):
+                logging.warning(f"[خط {i}] فایل صوتی یافت نشد — رد شد.")
                 continue
 
             tc = sub.get("time_code") if isinstance(sub, dict) else sub[0]
-            start, end = parse_time_code(tc)
-            
+            try:
+                start, end = parse_time_code(tc)
+            except Exception as e:
+                logging.warning(f"[خط {i}] time_code نامعتبر ({tc}) — رد شد: {e}")
+                continue
+
             target_dur = end - start
+            if target_dur <= 0.1:
+                logging.warning(f"[خط {i}] مدت زمان خیلی کوتاه ({target_dur}s) — رد شد.")
+                continue
+
             proc_audio = os.path.join(TEMP_DIR, f"processed_{i}.wav")
-            adjust_audio_speed(raw_audio, proc_audio, target_dur)
+
+            try:
+                enhance_audio_pipeline(raw_audio, proc_audio, target_dur, i)
+            except Exception as e:
+                logging.error(f"[خط {i}] خطا در pipeline: {e} — استفاده از تنظیم سرعت ساده.")
+                try:
+                    stage_speed_change(raw_audio, proc_audio, target_dur)
+                except Exception as e2:
+                    logging.error(f"[خط {i}] حتی fallback هم شکست خورد: {e2}")
+                    continue
+
             audio_segments.append({"start": start, "file": proc_audio})
+
+            # پیشرفت هر ۵ خط
+            if (i + 1) % 5 == 0 or (i + 1) == total_lines:
+                elapsed = round(time.time() - start_time, 1)
+                pct = int(30 * (i + 1) / total_lines)
+                bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+                update_telegram_message(
+                    msg_id,
+                    f"🎙 <b>پردازش صدا: {i+1}/{total_lines}</b>\n"
+                    f"⏱ {elapsed}s\n[{bar}] {pct}%"
+                )
 
         if not audio_segments:
             raise Exception("هیچ فایل صوتی پردازش‌شده‌ای برای میکس پیدا نشد.")
 
-        # مرحله ۲: ترکیب فایل‌های صوتی با FFmpeg
+        # ---------- مرحله ۲: میکس نهایی ----------
         elapsed = round(time.time() - start_time, 1)
-        update_telegram_message(msg_id, f"🎬 <b>در حال رندر و سینک صوتی روی ویدیو (FFmpeg)...</b>\n⏱ زمان طی شده: {elapsed} ثانیه\n[██████░░░░] 60%")
-        logging.info("مرحله ۲: شروع فرمان FFmpeg filter_complex")
+        update_telegram_message(
+            msg_id,
+            f"🎬 <b>میکس نهایی روی ویدیو (FFmpeg)...</b>\n"
+            f"⏱ {elapsed}s\n[██████░░░░] 60%"
+        )
+        logging.info("مرحله ۲: فرمان FFmpeg filter_complex")
 
         inputs = ["-i", video_path]
         filter_parts = []
@@ -278,12 +563,14 @@ def background_dubbing_process():
             inputs += ["-i", item["file"]]
             delay_ms = int(round(item["start"] * 1000))
             filter_parts.append(
-                f"[{i+1}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,adelay={delay_ms}:all=1[a{i}]"
+                f"[{i+1}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
+                f"adelay={delay_ms}:all=1[a{i}]"
             )
 
         mix_inputs = "".join(f"[a{i}]" for i in range(len(audio_segments)))
         filter_parts.append(
-            f"{mix_inputs}amix=inputs={len(audio_segments)}:duration=longest:normalize=0[aout]"
+            f"{mix_inputs}amix=inputs={len(audio_segments)}:duration=longest:normalize=0,"
+            f"loudnorm=I={LOUDNORM_I}:TP={LOUDNORM_TP}:LRA={LOUDNORM_LRA}[aout]"
         )
         filter_complex = ";".join(filter_parts)
 
@@ -292,42 +579,56 @@ def background_dubbing_process():
             "-filter_complex", filter_complex,
             "-map", "0:v", "-map", "[aout]",
             "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-            "-shortest", output_path
+            "-shortest", output_path,
         ]
         subprocess.run(cmd, check=True)
 
-        # مرحله ۳: اتمام و ارسال
+        # ---------- مرحله ۳: ارسال ----------
         total_time = round(time.time() - start_time, 1)
-        update_telegram_message(msg_id, f"✨ <b>رندر با موفقیت انجام شد!</b>\n⏱ زمان کل رندر: {total_time} ثانیه\nدر حال ارسال فایل...")
-        
+        update_telegram_message(
+            msg_id,
+            f"✨ <b>رندر کامل شد!</b>\n⏱ زمان کل: {total_time} ثانیه\nدر حال ارسال فایل..."
+        )
         caption = f"✨ <b>ویدیوی دوبله‌شده آماده شد!</b>\n⏱ زمان ساخت: {total_time} ثانیه"
         send_telegram_video(output_path, caption)
 
     except Exception as e:
         total_time = round(time.time() - start_time, 1)
-        logging.error(f"❌ خطا در رندر: {str(e)}")
-        update_telegram_message(msg_id, f"❌ <b>خطا در پردازش ویدیو!</b>\nمتن خطا: <code>{str(e)}</code>\n⏱ زمان طی شده: {total_time} ثانیه")
+        logging.error(f"❌ خطا در رندر: {e}")
+        update_telegram_message(
+            msg_id,
+            f"❌ <b>خطا در پردازش ویدیو!</b>\n"
+            f"<code>{str(e)}</code>\n⏱ {total_time}s"
+        )
     finally:
         render_lock.release()
 
 
-# ---------------------------------------------------------------
-# اندپوینت‌های FastAPI
-# ---------------------------------------------------------------
-
+# ==========================================================
+# 🌐 Endpoints
+# ==========================================================
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "Dubbing Pipeline Server is Ready"}
+    return {
+        "status": "ok",
+        "message": "Dubbing Pipeline Server is Ready",
+        "features": {
+            "noisereduce": True,
+            "nara_wpe": NARA_WPE_AVAILABLE,
+            "pedalboard": PEDALBOARD_AVAILABLE,
+        },
+    }
 
 
 @app.post("/get-audio-for-gemini")
 def get_audio_for_gemini(data: dict):
+    """n8n: دانلود ویدیو و استخراج WAV برای آنالیز Gemini"""
     video_url = data.get("video_url")
     if not video_url:
         raise HTTPException(status_code=400, detail="video_url ارسال نشده است.")
 
     temp_video_path = os.path.join(TEMP_DIR, "original_video.mp4")
-    final_wav_path = os.path.join(TEMP_DIR, "audio.wav")
+    final_wav_path  = os.path.join(TEMP_DIR, "audio.wav")
 
     if os.path.exists(temp_video_path):
         os.remove(temp_video_path)
@@ -336,11 +637,11 @@ def get_audio_for_gemini(data: dict):
 
     try:
         download_media(video_url, temp_video_path)
-        
+
         cmd = [
             "ffmpeg", "-y", "-i", temp_video_path,
             "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2",
-            final_wav_path
+            final_wav_path,
         ]
         subprocess.run(cmd, check=True)
 
@@ -351,6 +652,7 @@ def get_audio_for_gemini(data: dict):
 
 @app.post("/init-project")
 def init_project(data: InitProjectRequest):
+    """n8n: ذخیره زیرنویس‌ها و اطمینان از وجود ویدیو"""
     try:
         video_path = os.path.join(TEMP_DIR, "original_video.mp4")
         if not os.path.exists(video_path):
@@ -360,28 +662,28 @@ def init_project(data: InitProjectRequest):
         with open(sub_path, "w", encoding="utf-8") as f:
             json.dump(data.subtitles, f, ensure_ascii=False)
 
-        return {"status": "success", "message": "اطلاعات زیرنویس و ویدیوی اصلی ذخیره شدند."}
+        return {"status": "success", "message": "اطلاعات ذخیره شدند."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/upload-audio")
 async def upload_audio(line_index: int = Form(...), file: UploadFile = File(...)):
+    """n8n: دریافت فایل WAV هر خط"""
     try:
         audio_path = os.path.join(TEMP_DIR, f"audio_line_{line_index}.wav")
         with open(audio_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-            
-        return {"status": "success", "message": f"فایل صوتی خط {line_index} ذخیره شد."}
+        return {"status": "success", "message": f"خط {line_index} ذخیره شد."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/process-dubbing")
 def process_dubbing(background_tasks: BackgroundTasks):
+    """n8n: شروع رندر نهایی"""
     background_tasks.add_task(background_dubbing_process)
-    
     return {
         "status": "started",
-        "message": "پروسه ادیت و سینک صوتی آغاز شد. نوار پیشرفت و فایل نهایی در تلگرام ارسال می‌شود."
+        "message": "پروسه ادیت آغاز شد. نتیجه در تلگرام ارسال می‌شود.",
     }
