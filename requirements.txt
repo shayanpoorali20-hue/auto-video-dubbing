@@ -4,3 +4,8 @@ python-multipart
 yt-dlp
 pydantic
 requests
+numpy
+soundfile
+noisereduce
+pedalboard
+nara-wpe
