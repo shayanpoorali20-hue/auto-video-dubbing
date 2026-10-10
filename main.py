@@ -198,7 +198,7 @@ def parse_time_code(tc):
     return float(m1 * 60 + s1), float(m2 * 60 + s2)
 
 
-def adjust_audio_speed(input_audio, output_audio, target_duration, min_speed=0.7, max_speed=3.0, fade=0.15):
+def adjust_audio_speed(input_audio, output_audio, target_duration, min_speed=0.7, max_speed=3.0, fade=0.02):
     current = get_audio_duration(input_audio)
     raw_speed = current / target_duration
     speed = max(min_speed, min(raw_speed, max_speed))
@@ -208,8 +208,11 @@ def adjust_audio_speed(input_audio, output_audio, target_duration, min_speed=0.7
     else:
         speed_filter = build_atempo_chain(speed)
 
+    # محاسبه دقیق زمان شروع fade out برای ۲۰ میلی‌ثانیه آخر جهت حذف صدای تق
     fade_start = max(0.0, target_duration - fade)
-    filter_str = f"{speed_filter},afade=t=out:st={fade_start:.3f}:d={fade:.3f}"
+    
+    # فیلتر ترکیبی شامل تغییر سرعت، فید اوت تمیز و کمپرسور/تثبیت‌کننده ولوم صوتی
+    filter_str = f"{speed_filter},afade=t=out:st={fade_start:.3f}:d={fade:.3f},acompressor=threshold=-18dB:ratio=3:attack=5:release=50"
 
     cmd = [
         "ffmpeg", "-y", "-i", input_audio,
@@ -219,7 +222,6 @@ def adjust_audio_speed(input_audio, output_audio, target_duration, min_speed=0.7
         output_audio
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
 
 # ---------------------------------------------------------------
 # تابع پردازش اصلی رندر در پس‌زمینه
