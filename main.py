@@ -194,7 +194,7 @@ def background_subtitle_process(video_url: str, subtitles: list):
         srt_path = os.path.join(TEMP_DIR, "subs.srt")
         output_path = os.path.join(TEMP_DIR, "final_subtitled_video.mp4")
 
-        # اگر ویدیو از قبل برای استخراج صوت دانلود شده بود، از همان استفاده کن، وگرنه دانلود کن
+        # دانلود ویدیو اگر وجود نداشت
         if not os.path.exists(video_path):
             download_media(video_url, video_path)
 
@@ -204,9 +204,11 @@ def background_subtitle_process(video_url: str, subtitles: list):
         update_telegram_message(msg_id, "🎬 <b>در حال حک کردن زیرنویس روی ویدیو (FFmpeg)...</b>\n[████████░░] 80%")
         logging.info("شروع رندر ویدیو با زیرنویس توسط FFmpeg")
 
+        # استفاده از سینتکس امن‌تر برای جلوگیری از فریز شدن در لینوکس
+        # در این حالت مسیر فایل به صورت استاندارد پاس داده می‌شود
         ffmpeg_cmd = [
             "ffmpeg", "-y", "-i", video_path,
-            "-vf", f"subtitles={srt_path}:force_style='FontName=Arial,FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=30'",
+            "-vf", f"subtitles={srt_path}",
             "-c:v", "libx264", "-preset", "fast", "-crf", "22",
             "-c:a", "copy",
             output_path
