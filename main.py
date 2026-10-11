@@ -10,7 +10,7 @@ import threading
 import urllib.request
 import urllib.error
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import yt_dlp
@@ -19,7 +19,7 @@ import requests
 # تنظیمات Logging برای مشاهده دقیق جزئیات در Render
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-app = FastAPI(title="Instagram Auto Dubbing Service")
+app = FastAPI(title="Instagram Auto Subtitle Service")
 
 # پوشه موقت کاری برای کل پروژه
 TEMP_DIR = tempfile.mkdtemp()
@@ -28,22 +28,30 @@ TEMP_DIR = tempfile.mkdtemp()
 render_lock = threading.Lock()
 
 # ==========================================
-# 🔑 اطلاعات تلگرام (اصلاح‌شده)
+# 🔑 اطلاعات تلگرام
 # ==========================================
 TELEGRAM_BOT_TOKEN = "8956121858:AAF1ZQD-KCKSCbd-GOfGc2CziHpBFBONhxA"
-TELEGRAM_CHAT_ID = "5080371184"  # علامت منفی (-) حذف شد
+TELEGRAM_CHAT_ID = "5080371184"
 
 
-class InitProjectRequest(BaseModel):
+class SubtitleItem(BaseModel):
+    line_index: int
+    time_code: str
+    start_seconds: float
+    end_seconds: float
+    original_text: str
+    persian_text: str
+
+
+class ProcessSubtitlesRequest(BaseModel):
     video_url: str
-    subtitles: list  # آرایه‌ای از تایم‌کدها و متن‌ها
+    subtitles: list[SubtitleItem]
 
 
 # ---------------------------------------------------------------
 # توابع کمکی ارتباط با تلگرام
 # ---------------------------------------------------------------
 def send_telegram_message(text: str) -> int:
-    """ارسال یک پیام جدید به تلگرام و برگرداندن message_id"""
     if not TELEGRAM_BOT_TOKEN:
         return None
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -52,15 +60,12 @@ def send_telegram_message(text: str) -> int:
         res = requests.post(url, json=payload, timeout=10).json()
         if res.get("ok"):
             return res["result"]["message_id"]
-        else:
-            logging.error(f"خطای ارسال پیام تلگرام: {res.get('description')}")
     except Exception as e:
         logging.error(f"خطا در ارسال پیام به تلگرام: {e}")
     return None
 
 
 def update_telegram_message(message_id: int, text: str):
-    """ویرایش پیام لودینگ قبلی در تلگرام"""
     if not message_id or not TELEGRAM_BOT_TOKEN:
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
@@ -77,13 +82,12 @@ def update_telegram_message(message_id: int, text: str):
 
 
 def send_telegram_video(video_path: str, caption: str):
-    """ارسال فایل ویدیو به تلگرام و گزارش دقیق خطای احتمالی"""
     if not os.path.exists(video_path):
-        send_telegram_message(f"❌ <b>خطا:</b> فایل ویدیو در مسیر زیر یافت نشد:\n<code>{video_path}</code>")
+        send_telegram_message(f"❌ <b>خطا:</b> فایل ویدیو یافت نشد.")
         return
 
     file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
-    send_telegram_message(f"📦 <b>شروع آپلود ویدیو...</b>\nحجم فایل: {file_size_mb:.2f} مگابایت")
+    send_telegram_message(f"📦 <b>شروع آپلود ویدیوی زیرنویس‌شده...</b>\nحجم فایل: {file_size_mb:.2f} مگابایت")
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
     boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
@@ -130,185 +134,101 @@ def send_telegram_video(video_path: str, caption: str):
         with urllib.request.urlopen(req, timeout=300) as response:
             res = json.loads(response.read().decode())
             if res.get("ok"):
-                send_telegram_message("🚀 <b>ویدیو با موفقیت ارسال شد!</b>")
+                send_telegram_message("🚀 <b>ویدیو با زیرنویس موفقیت ارسال شد!</b>")
             else:
-                desc = res.get('description', 'خطای نامشخص')
-                send_telegram_message(f"❌ <b>تلگرام فایل را رد کرد:</b>\n<code>{desc}</code>")
-
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode()
-        send_telegram_message(f"❌ <b>خطای HTTP تلگرام:</b> {e.code}\n<code>{error_body}</code>")
+                send_telegram_message(f"❌ <b>خطای تلگرام:</b> {res.get('description')}")
     except Exception as e:
-        send_telegram_message(f"❌ <b>خطای غیرمنتظره هنگام آپلود:</b>\n<code>{str(e)}</code>")
+        send_telegram_message(f"❌ <b>خطای آپلود:</b> <code>{str(e)}</code>")
 
 
 # ---------------------------------------------------------------
-# توابع کمکی دانلود و FFmpeg
+# توابع کمکی دانلود ویدیو و تبدیل زمان به استاندارد SRT
 # ---------------------------------------------------------------
 def download_media(url: str, output_path: str):
     ydl_opts = {
         'outtmpl': output_path,
         'quiet': False,
-        'no_warnings': False,
+        'no_warnings': True,
         'nocheckcertificate': True,
         'geo_bypass': True,
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
     }
-
-    cookie_file = None
     if os.path.exists("cookies.txt"):
-        cookie_file = "cookies.txt"
+        ydl_opts['cookiefile'] = "cookies.txt"
     elif os.path.exists("cookie.txt"):
-        cookie_file = "cookie.txt"
-
-    if cookie_file:
-        ydl_opts['cookiefile'] = cookie_file
+        ydl_opts['cookiefile'] = "cookie.txt"
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
 
 
-def get_audio_duration(file_path):
-    cmd = ["ffmpeg", "-i", file_path]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", result.stderr)
-    if not match:
-        raise ValueError(f"طول فایل خوانده نشد: {file_path}")
-    h, m, s = map(float, match.groups())
-    return h * 3600 + m * 60 + s
+def seconds_to_srt_time(seconds: float) -> str:
+    """تبدیل ثانیه به فرمت استاندارد زمان زیرنویس (HH:MM:SS,ms)"""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    milliseconds = int(round((seconds - int(seconds)) * 1000))
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
 
 
-def build_atempo_chain(speed):
-    parts = []
-    while speed > 2.0:
-        parts.append("atempo=2.0")
-        speed /= 2.0
-    while speed < 0.5:
-        parts.append("atempo=0.5")
-        speed /= 0.5
-    parts.append(f"atempo={speed:.6f}")
-    return ",".join(parts)
+def create_srt_file(subtitles: list, srt_path: str):
+    """ساخت فایل استاندارد SRT از لیست زیرنویس‌ها"""
+    with open(srt_path, "w", encoding="utf-8") as f:
+        for idx, sub in enumerate(subtitles, start=1):
+            start_str = seconds_to_srt_time(sub.start_seconds)
+            end_str = seconds_to_srt_time(sub.end_seconds)
+            f.write(f"{idx}\n{start_str} --> {end_str}\n{sub.persian_text}\n\n")
 
-
-def parse_time_code(tc):
-    m = re.match(r"\[\s*(\d+):(\d+)\s*-\s*(\d+):(\d+)\s*\]", tc)
-    if not m:
-        raise ValueError(f"فرمت time_code نامعتبر است: {tc}")
-    m1, s1, m2, s2 = map(int, m.groups())
-    return float(m1 * 60 + s1), float(m2 * 60 + s2)
-
-
-def adjust_audio_speed(input_audio, output_audio, target_duration, min_speed=0.7, max_speed=3.0, fade=0.02):
-    current = get_audio_duration(input_audio)
-    raw_speed = current / target_duration
-    speed = max(min_speed, min(raw_speed, max_speed))
-
-    if 0.5 <= speed <= 2.0:
-        speed_filter = f"rubberband=tempo={speed:.6f}:pitch=1"
-    else:
-        speed_filter = build_atempo_chain(speed)
-
-    # محاسبه دقیق زمان شروع fade out برای ۲۰ میلی‌ثانیه آخر جهت حذف صدای تق
-    fade_start = max(0.0, target_duration - fade)
-    
-    # فیلتر ترکیبی شامل تغییر سرعت، فید اوت تمیز و کمپرسور/تثبیت‌کننده ولوم صوتی
-    filter_str = f"{speed_filter},afade=t=out:st={fade_start:.3f}:d={fade:.3f},acompressor=threshold=-18dB:ratio=3:attack=5:release=50"
-
-    cmd = [
-        "ffmpeg", "-y", "-i", input_audio,
-        "-filter:a", filter_str,
-        "-t", f"{target_duration:.3f}",
-        "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le",
-        output_audio
-    ]
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 # ---------------------------------------------------------------
-# تابع پردازش اصلی رندر در پس‌زمینه
+# پروسه اصلی رندر ویدیو و چسباندن زیرنویس در پس‌زمینه
 # ---------------------------------------------------------------
-def background_dubbing_process():
-    # اگر رندر دیگری فعال است، اجرا نکن
+def background_subtitle_process(video_url: str, subtitles: list):
     if not render_lock.acquire(blocking=False):
-        logging.warning("یک پروسه رندر دیگر در حال اجراست. درخواست همزمان لغو شد.")
+        logging.warning("یک پروسه رندر دیگر در حال اجراست.")
         return
 
     start_time = time.time()
-    msg_id = send_telegram_message("⏳ <b>شروع پروسه رندر ویدیو...</b>\nدر حال تایید و خواندن فایل‌ها...")
+    msg_id = send_telegram_message("⏳ <b>شروع پروسه ساخت و چسباندن زیرنویس...</b>\nدر حال دانلود ویدیو...")
 
     try:
         video_path = os.path.join(TEMP_DIR, "original_video.mp4")
-        sub_path = os.path.join(TEMP_DIR, "subtitles.json")
-        output_path = os.path.join(TEMP_DIR, "final_dubbed_video.mp4")
+        srt_path = os.path.join(TEMP_DIR, "subs.srt")
+        output_path = os.path.join(TEMP_DIR, "final_subtitled_video.mp4")
 
-        if not os.path.exists(video_path) or not os.path.exists(sub_path):
-            raise Exception("فایل ویدیو یا زیرنویس اصلی در TEMP_DIR پیدا نشد.")
+        # دانلود ویدیو
+        if not os.path.exists(video_path):
+            download_media(video_url, video_path)
 
-        with open(sub_path, "r", encoding="utf-8") as f:
-            subtitles = json.load(f)
+        # ساخت فایل SRT
+        create_srt_file(subtitles, srt_path)
 
-        # مرحله ۱: تنظیم سرعت ویس‌ها
-        elapsed = round(time.time() - start_time, 1)
-        update_telegram_message(msg_id, f"🎙 <b>در حال تنظیم سرعت ویس‌ها (Rubberband)...</b>\n⏱ زمان طی شده: {elapsed} ثانیه\n[███░░░░░░░] 30%")
-        logging.info("مرحله ۱: تنظیم سرعت تک‌تک ویس‌ها")
+        update_telegram_message(msg_id, "🎬 <b>در حال حک کردن زیرنویس روی ویدیو (FFmpeg)...</b>\n[████████░░] 80%")
+        logging.info("شروع رندر ویدیو با زیرنویس توسط FFmpeg")
 
-        audio_segments = []
-        for i, sub in enumerate(subtitles):
-            raw_audio = os.path.join(TEMP_DIR, f"audio_line_{i}.wav")
-            if not os.path.exists(raw_audio):
-                continue
-
-            tc = sub.get("time_code") if isinstance(sub, dict) else sub[0]
-            start, end = parse_time_code(tc)
-            
-            target_dur = end - start
-            proc_audio = os.path.join(TEMP_DIR, f"processed_{i}.wav")
-            adjust_audio_speed(raw_audio, proc_audio, target_dur)
-            audio_segments.append({"start": start, "file": proc_audio})
-
-        if not audio_segments:
-            raise Exception("هیچ فایل صوتی پردازش‌شده‌ای برای میکس پیدا نشد.")
-
-        # مرحله ۲: ترکیب فایل‌های صوتی با FFmpeg
-        elapsed = round(time.time() - start_time, 1)
-        update_telegram_message(msg_id, f"🎬 <b>در حال رندر و سینک صوتی روی ویدیو (FFmpeg)...</b>\n⏱ زمان طی شده: {elapsed} ثانیه\n[██████░░░░] 60%")
-        logging.info("مرحله ۲: شروع فرمان FFmpeg filter_complex")
-
-        inputs = ["-i", video_path]
-        filter_parts = []
-
-        for i, item in enumerate(audio_segments):
-            inputs += ["-i", item["file"]]
-            delay_ms = int(round(item["start"] * 1000))
-            filter_parts.append(
-                f"[{i+1}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,adelay={delay_ms}:all=1[a{i}]"
-            )
-
-        mix_inputs = "".join(f"[a{i}]" for i in range(len(audio_segments)))
-        filter_parts.append(
-            f"{mix_inputs}amix=inputs={len(audio_segments)}:duration=longest:normalize=0[aout]"
-        )
-        filter_complex = ";".join(filter_parts)
-
-        cmd = [
-            "ffmpeg", "-y", *inputs,
-            "-filter_complex", filter_complex,
-            "-map", "0:v", "-map", "[aout]",
-            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-            "-shortest", output_path
+        # دستور FFmpeg برای چسباندن زیرنویس با فونت شیک و خوانا
+        # توجه: در سرور لینوکسی لایت‌پورت/رندر، مسیر فونت پیش‌فرض بررسی می‌شود
+        # از سبک‌های زیبا با حاشیه مشکی استفاده شده تا روی هر ویدیویی خوانا باشد
+        ffmpeg_cmd = [
+            "ffmpeg", "-y", "-i", video_path,
+            "-vf", f"subtitles={srt_path}:force_style='FontName=Arial,FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=30'",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+            "-c:a", "copy",
+            output_path
         ]
-        subprocess.run(cmd, check=True)
 
-        # مرحله ۳: اتمام و ارسال
+        subprocess.run(ffmpeg_cmd, check=True)
+
         total_time = round(time.time() - start_time, 1)
-        update_telegram_message(msg_id, f"✨ <b>رندر با موفقیت انجام شد!</b>\n⏱ زمان کل رندر: {total_time} ثانیه\nدر حال ارسال فایل...")
+        update_telegram_message(msg_id, f"✨ <b>زیرنویس با موفقیت روی ویدیو قرار گرفت!</b>\n⏱ زمان کل: {total_time} ثانیه")
         
-        caption = f"✨ <b>ویدیوی دوبله‌شده آماده شد!</b>\n⏱ زمان ساخت: {total_time} ثانیه"
+        caption = f"✨ <b>ویدیوی زیرنویس‌شده آماده شد!</b>\n⏱ زمان ساخت: {total_time} ثانیه"
         send_telegram_video(output_path, caption)
 
     except Exception as e:
         total_time = round(time.time() - start_time, 1)
-        logging.error(f"❌ خطا در رندر: {str(e)}")
-        update_telegram_message(msg_id, f"❌ <b>خطا در پردازش ویدیو!</b>\nمتن خطا: <code>{str(e)}</code>\n⏱ زمان طی شده: {total_time} ثانیه")
+        logging.error(f"❌ خطا در رندر زیرنویس: {str(e)}")
+        update_telegram_message(msg_id, f"❌ <b>خطا در پردازش ویدیو!</b>\n<code>{str(e)}</code>")
     finally:
         render_lock.release()
 
@@ -319,71 +239,15 @@ def background_dubbing_process():
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "Dubbing Pipeline Server is Ready"}
+    return {"status": "ok", "message": "Subtitle Pipeline Server is Ready"}
 
 
-@app.post("/get-audio-for-gemini")
-def get_audio_for_gemini(data: dict):
-    video_url = data.get("video_url")
-    if not video_url:
-        raise HTTPException(status_code=400, detail="video_url ارسال نشده است.")
-
-    temp_video_path = os.path.join(TEMP_DIR, "original_video.mp4")
-    final_wav_path = os.path.join(TEMP_DIR, "audio.wav")
-
-    if os.path.exists(temp_video_path):
-        os.remove(temp_video_path)
-    if os.path.exists(final_wav_path):
-        os.remove(final_wav_path)
-
-    try:
-        download_media(video_url, temp_video_path)
-        
-        cmd = [
-            "ffmpeg", "-y", "-i", temp_video_path,
-            "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2",
-            final_wav_path
-        ]
-        subprocess.run(cmd, check=True)
-
-        return FileResponse(path=final_wav_path, filename="audio.wav", media_type="audio/wav")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/init-project")
-def init_project(data: InitProjectRequest):
-    try:
-        video_path = os.path.join(TEMP_DIR, "original_video.mp4")
-        if not os.path.exists(video_path):
-            download_media(data.video_url, video_path)
-
-        sub_path = os.path.join(TEMP_DIR, "subtitles.json")
-        with open(sub_path, "w", encoding="utf-8") as f:
-            json.dump(data.subtitles, f, ensure_ascii=False)
-
-        return {"status": "success", "message": "اطلاعات زیرنویس و ویدیوی اصلی ذخیره شدند."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/upload-audio")
-async def upload_audio(line_index: int = Form(...), file: UploadFile = File(...)):
-    try:
-        audio_path = os.path.join(TEMP_DIR, f"audio_line_{line_index}.wav")
-        with open(audio_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-            
-        return {"status": "success", "message": f"فایل صوتی خط {line_index} ذخیره شد."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/process-dubbing")
-def process_dubbing(background_tasks: BackgroundTasks):
-    background_tasks.add_task(background_dubbing_process)
+@app.post("/process-subtitles")
+def process_subtitles(data: ProcessSubtitlesRequest, background_tasks: BackgroundTasks):
+    """اندپوینت جدید برای دریافت ویدیو و زیرنویس‌ها و شروع رندر در پس‌زمینه"""
+    background_tasks.add_task(background_subtitle_process, data.video_url, data.subtitles)
     
     return {
         "status": "started",
-        "message": "پروسه ادیت و سینک صوتی آغاز شد. نوار پیشرفت و فایل نهایی در تلگرام ارسال می‌شود."
+        "message": "پروسه ساخت و چسباندن زیرنویس آغاز شد. نتیجه در تلگرام ارسال خواهد شد."
     }
