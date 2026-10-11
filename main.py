@@ -134,7 +134,7 @@ def send_telegram_video(video_path: str, caption: str):
         with urllib.request.urlopen(req, timeout=300) as response:
             res = json.loads(response.read().decode())
             if res.get("ok"):
-                send_telegram_message("🚀 <b>ویدیو با زیرنویس موفقیت ارسال شد!</b>")
+                send_telegram_message("🚀 <b>ویدیو با زیرنویس با موفقیت ارسال شد!</b>")
             else:
                 send_telegram_message(f"❌ <b>خطای تلگرام:</b> {res.get('description')}")
     except Exception as e:
@@ -142,7 +142,7 @@ def send_telegram_video(video_path: str, caption: str):
 
 
 # ---------------------------------------------------------------
-# توابع کمکی دانلود ویدیو و تبدیل زمان به استاندارد SRT
+# توابع کمکی دانلود ویدیو و پردازش SRT
 # ---------------------------------------------------------------
 def download_media(url: str, output_path: str):
     ydl_opts = {
@@ -163,7 +163,6 @@ def download_media(url: str, output_path: str):
 
 
 def seconds_to_srt_time(seconds: float) -> str:
-    """تبدیل ثانیه به فرمت استاندارد زمان زیرنویس (HH:MM:SS,ms)"""
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
     secs = int(seconds % 60)
@@ -172,7 +171,6 @@ def seconds_to_srt_time(seconds: float) -> str:
 
 
 def create_srt_file(subtitles: list, srt_path: str):
-    """ساخت فایل استاندارد SRT از لیست زیرنویس‌ها"""
     with open(srt_path, "w", encoding="utf-8") as f:
         for idx, sub in enumerate(subtitles, start=1):
             start_str = seconds_to_srt_time(sub.start_seconds)
@@ -189,14 +187,14 @@ def background_subtitle_process(video_url: str, subtitles: list):
         return
 
     start_time = time.time()
-    msg_id = send_telegram_message("⏳ <b>شروع پروسه ساخت و چسباندن زیرنویس...</b>\nدر حال دانلود ویدیو...")
+    msg_id = send_telegram_message("⏳ <b>شروع پروسه ساخت و چسباندن زیرنویس...</b>\nدر حال بررسی فایل‌ها...")
 
     try:
         video_path = os.path.join(TEMP_DIR, "original_video.mp4")
         srt_path = os.path.join(TEMP_DIR, "subs.srt")
         output_path = os.path.join(TEMP_DIR, "final_subtitled_video.mp4")
 
-        # دانلود ویدیو
+        # اگر ویدیو از قبل برای استخراج صوت دانلود شده بود، از همان استفاده کن، وگرنه دانلود کن
         if not os.path.exists(video_path):
             download_media(video_url, video_path)
 
@@ -206,9 +204,6 @@ def background_subtitle_process(video_url: str, subtitles: list):
         update_telegram_message(msg_id, "🎬 <b>در حال حک کردن زیرنویس روی ویدیو (FFmpeg)...</b>\n[████████░░] 80%")
         logging.info("شروع رندر ویدیو با زیرنویس توسط FFmpeg")
 
-        # دستور FFmpeg برای چسباندن زیرنویس با فونت شیک و خوانا
-        # توجه: در سرور لینوکسی لایت‌پورت/رندر، مسیر فونت پیش‌فرض بررسی می‌شود
-        # از سبک‌های زیبا با حاشیه مشکی استفاده شده تا روی هر ویدیویی خوانا باشد
         ffmpeg_cmd = [
             "ffmpeg", "-y", "-i", video_path,
             "-vf", f"subtitles={srt_path}:force_style='FontName=Arial,FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=30'",
@@ -242,9 +237,37 @@ def health_check():
     return {"status": "ok", "message": "Subtitle Pipeline Server is Ready"}
 
 
+@app.post("/get-audio-for-gemini")
+def get_audio_for_gemini(data: dict):
+    """اندپوینت برای دانلود ویدیو از اینستاگرام/لینک و استخراج فایل صوتی جهت تحویل به جمینای"""
+    video_url = data.get("video_url")
+    if not video_url:
+        raise HTTPException(status_code=400, detail="video_url ارسال نشده است.")
+
+    temp_video_path = os.path.join(TEMP_DIR, "original_video.mp4")
+    final_wav_path = os.path.join(TEMP_DIR, "audio.wav")
+
+    try:
+        # اگر ویدیو وجود نداشت، دانلودش کن
+        if not os.path.exists(temp_video_path):
+            download_media(video_url, temp_video_path)
+        
+        # استخراج فایل صوتی WAV برای جمینای
+        cmd = [
+            "ffmpeg", "-y", "-i", temp_video_path,
+            "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2",
+            final_wav_path
+        ]
+        subprocess.run(cmd, check=True)
+
+        return FileResponse(path=final_wav_path, filename="audio.wav", media_type="audio/wav")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/process-subtitles")
 def process_subtitles(data: ProcessSubtitlesRequest, background_tasks: BackgroundTasks):
-    """اندپوینت جدید برای دریافت ویدیو و زیرنویس‌ها و شروع رندر در پس‌زمینه"""
+    """اندپوینت دریافت زیرنویس‌ها و شروع رندر نهایی ویدیو"""
     background_tasks.add_task(background_subtitle_process, data.video_url, data.subtitles)
     
     return {
