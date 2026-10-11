@@ -33,6 +33,12 @@ render_lock = threading.Lock()
 TELEGRAM_BOT_TOKEN = "8956121858:AAF1ZQD-KCKSCbd-GOfGc2CziHpBFBONhxA"
 TELEGRAM_CHAT_ID = "5080371184"
 
+# حداکثر حجم مجاز برای ارسال ویدیو در Bot API (50MB)
+TELEGRAM_MAX_VIDEO_MB = 50
+
+# تایم‌اوت ffmpeg (ثانیه)
+FFMPEG_TIMEOUT = 1800
+
 
 class SubtitleItem(BaseModel):
     line_index: int
@@ -60,6 +66,7 @@ def send_telegram_message(text: str) -> int:
         res = requests.post(url, json=payload, timeout=10).json()
         if res.get("ok"):
             return res["result"]["message_id"]
+        logging.error(f"تلگرام خطا داد: {res}")
     except Exception as e:
         logging.error(f"خطا در ارسال پیام به تلگرام: {e}")
     return None
@@ -83,16 +90,24 @@ def update_telegram_message(message_id: int, text: str):
 
 def send_telegram_video(video_path: str, caption: str):
     if not os.path.exists(video_path):
-        send_telegram_message(f"❌ <b>خطا:</b> فایل ویدیو یافت نشد.")
+        send_telegram_message("❌ <b>خطا:</b> فایل ویدیو یافت نشد.")
         return
 
     file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
+    if file_size_mb > TELEGRAM_MAX_VIDEO_MB:
+        send_telegram_message(
+            f"⚠️ <b>حجم ویدیو {file_size_mb:.2f} مگابایت است و از حد مجاز تلگرام "
+            f"({TELEGRAM_MAX_VIDEO_MB}MB) بیشتر است.</b>\n"
+            f"فایل روی سرور ساخته شد اما قابل ارسال از طریق Bot API نیست."
+        )
+        return
+
     send_telegram_message(f"📦 <b>شروع آپلود ویدیوی زیرنویس‌شده...</b>\nحجم فایل: {file_size_mb:.2f} مگابایت")
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
     boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
     headers = {'Content-Type': f'multipart/form-data; boundary={boundary}'}
-    
+
     try:
         body = []
         body.extend([
@@ -113,10 +128,10 @@ def send_telegram_video(video_path: str, caption: str):
             ''.encode(),
             'HTML'.encode()
         ])
-        
+
         with open(video_path, 'rb') as f:
             video_bytes = f.read()
-        
+
         filename = os.path.basename(video_path)
         body.extend([
             f'--{boundary}'.encode(),
@@ -127,11 +142,11 @@ def send_telegram_video(video_path: str, caption: str):
         ])
         body.append(f'--{boundary}--'.encode())
         body.append(''.encode())
-        
+
         payload = b'\r\n'.join(body)
         req = urllib.request.Request(url, data=payload, headers=headers)
 
-        with urllib.request.urlopen(req, timeout=300) as response:
+        with urllib.request.urlopen(req, timeout=600) as response:
             res = json.loads(response.read().decode())
             if res.get("ok"):
                 send_telegram_message("🚀 <b>ویدیو با زیرنویس با موفقیت ارسال شد!</b>")
@@ -163,10 +178,15 @@ def download_media(url: str, output_path: str):
 
 
 def seconds_to_srt_time(seconds: float) -> str:
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    milliseconds = int(round((seconds - int(seconds)) * 1000))
+    # جلوگیری از خطای NaN/منفی
+    if seconds is None or seconds < 0:
+        seconds = 0.0
+
+    total_ms = int(round(seconds * 1000))
+    hours = total_ms // 3600000
+    minutes = (total_ms % 3600000) // 60000
+    secs = (total_ms % 60000) // 1000
+    milliseconds = total_ms % 1000
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
 
 
@@ -178,56 +198,126 @@ def create_srt_file(subtitles: list, srt_path: str):
             f.write(f"{idx}\n{start_str} --> {end_str}\n{sub.persian_text}\n\n")
 
 
+def run_ffmpeg(cmd: list, timeout: int = FFMPEG_TIMEOUT):
+    """
+    اجرای امن ffmpeg:
+    - stdin بسته می‌شود تا ffmpeg منتظر ورودی نماند
+    - stderr لاگ می‌شود تا در صورت خطا دلیل مشخص باشد
+    - timeout برای جلوگیری از هنگ ابدی
+    """
+    logging.info(f"اجرای ffmpeg: {' '.join(cmd)}")
+    try:
+        result = subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"ffmpeg بعد از {timeout} ثانیه تایم‌اوت شد و متوقف شد.")
+
+    stderr_text = result.stderr.decode(errors="ignore") if result.stderr else ""
+    if result.returncode != 0:
+        # فقط ۲۰۰۰ کاراکتر آخر stderr را لاگ کن
+        tail = stderr_text[-2000:]
+        logging.error(f"ffmpeg با کد {result.returncode} خارج شد:\n{tail}")
+        raise RuntimeError(f"ffmpeg خطا داد (کد {result.returncode}):\n{tail}")
+    return stderr_text
+
+
 # ---------------------------------------------------------------
 # پروسه اصلی رندر ویدیو و چسباندن زیرنویس در پس‌زمینه
 # ---------------------------------------------------------------
 def background_subtitle_process(video_url: str, subtitles: list):
     if not render_lock.acquire(blocking=False):
         logging.warning("یک پروسه رندر دیگر در حال اجراست.")
+        send_telegram_message("⚠️ یک پروسه رندر دیگر در حال اجراست. لطفاً بعداً تلاش کنید.")
         return
 
     start_time = time.time()
     msg_id = send_telegram_message("⏳ <b>شروع پروسه ساخت و چسباندن زیرنویس...</b>\nدر حال بررسی فایل‌ها...")
 
-    try:
-        video_path = os.path.join(TEMP_DIR, "original_video.mp4")
-        srt_path = os.path.join(TEMP_DIR, "subs.srt")
-        output_path = os.path.join(TEMP_DIR, "final_subtitled_video.mp4")
+    # پوشه موقت یکتا برای هر درخواست
+    job_dir = tempfile.mkdtemp(dir=TEMP_DIR)
+    video_path = os.path.join(job_dir, "original_video.mp4")
+    srt_path = os.path.join(job_dir, "subs.srt")
+    output_path = os.path.join(job_dir, "final_subtitled_video.mp4")
 
-        # دانلود ویدیو اگر وجود نداشت
+    try:
+        # دانلود ویدیو
         if not os.path.exists(video_path):
+            update_telegram_message(msg_id, "⬇️ <b>در حال دانلود ویدیو از لینک...</b>")
             download_media(video_url, video_path)
+
+        if not os.path.exists(video_path):
+            raise RuntimeError("دانلود ویدیو ناموفق بود؛ فایل خروجی ساخته نشد.")
 
         # ساخت فایل SRT
         create_srt_file(subtitles, srt_path)
 
-        update_telegram_message(msg_id, "🎬 <b>در حال حک کردن زیرنویس روی ویدیو (FFmpeg)...</b>\n[████████░░] 80%")
+        update_telegram_message(
+            msg_id,
+            "🎬 <b>در حال حک کردن زیرنویس روی ویدیو (FFmpeg)...</b>\n[████████░░] 80%"
+        )
         logging.info("شروع رندر ویدیو با زیرنویس توسط FFmpeg")
 
-        # استفاده از سینتکس امن‌تر برای جلوگیری از فریز شدن در لینوکس
-        # در این حالت مسیر فایل به صورت استاندارد پاس داده می‌شود
+        # escape کردن مسیر SRT برای فیلتر subtitles
+        srt_path_escaped = srt_path.replace("\\", "/").replace(":", "\\:")
+
         ffmpeg_cmd = [
-            "ffmpeg", "-y", "-i", video_path,
-            "-vf", f"subtitles={srt_path}",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
-            "-c:a", "copy",
+            "ffmpeg", "-y", "-nostdin",
+            "-i", video_path,
+            "-vf", f"subtitles='{srt_path_escaped}'",
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "23",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
             output_path
         ]
 
-        subprocess.run(ffmpeg_cmd, check=True)
+        run_ffmpeg(ffmpeg_cmd, timeout=FFMPEG_TIMEOUT)
 
+        if not os.path.exists(output_path):
+            raise RuntimeError("فایل خروجی پس از اجرای ffmpeg ساخته نشد.")
+
+        output_size_mb = os.path.getsize(output_path) / (1024 * 1024)
         total_time = round(time.time() - start_time, 1)
-        update_telegram_message(msg_id, f"✨ <b>زیرنویس با موفقیت روی ویدیو قرار گرفت!</b>\n⏱ زمان کل: {total_time} ثانیه")
-        
-        caption = f"✨ <b>ویدیوی زیرنویس‌شده آماده شد!</b>\n⏱ زمان ساخت: {total_time} ثانیه"
+
+        update_telegram_message(
+            msg_id,
+            f"✨ <b>زیرنویس با موفقیت روی ویدیو قرار گرفت!</b>\n"
+            f"⏱ زمان کل: {total_time} ثانیه\n"
+            f"📦 حجم خروجی: {output_size_mb:.2f} مگابایت"
+        )
+
+        caption = (
+            f"✨ <b>ویدیوی زیرنویس‌شده آماده شد!</b>\n"
+            f"⏱ زمان ساخت: {total_time} ثانیه\n"
+            f"📦 حجم: {output_size_mb:.2f} مگابایت"
+        )
         send_telegram_video(output_path, caption)
 
     except Exception as e:
         total_time = round(time.time() - start_time, 1)
-        logging.error(f"❌ خطا در رندر زیرنویس: {str(e)}")
-        update_telegram_message(msg_id, f"❌ <b>خطا در پردازش ویدیو!</b>\n<code>{str(e)}</code>")
+        logging.exception("❌ خطا در رندر زیرنویس")
+        err_text = str(e)[:1500]
+        update_telegram_message(
+            msg_id,
+            f"❌ <b>خطا در پردازش ویدیو!</b>\n"
+            f"⏱ بعد از {total_time} ثانیه\n"
+            f"<code>{err_text}</code>"
+        )
     finally:
         render_lock.release()
+        # پاک‌سازی فایل‌های موقت این job
+        try:
+            shutil.rmtree(job_dir, ignore_errors=True)
+        except Exception as cleanup_err:
+            logging.warning(f"خطا در پاک‌سازی پوشه موقت: {cleanup_err}")
 
 
 # ---------------------------------------------------------------
@@ -241,29 +331,34 @@ def health_check():
 
 @app.post("/get-audio-for-gemini")
 def get_audio_for_gemini(data: dict):
-    """اندپوینت برای دانلود ویدیو از اینستاگرام/لینک و استخراج فایل صوتی جهت تحویل به جمینای"""
+    """اندپوینت برای دانلود ویدیو و استخراج فایل صوتی جهت تحویل به جمینای"""
     video_url = data.get("video_url")
     if not video_url:
         raise HTTPException(status_code=400, detail="video_url ارسال نشده است.")
 
-    temp_video_path = os.path.join(TEMP_DIR, "original_video.mp4")
-    final_wav_path = os.path.join(TEMP_DIR, "audio.wav")
+    job_dir = tempfile.mkdtemp(dir=TEMP_DIR)
+    temp_video_path = os.path.join(job_dir, "original_video.mp4")
+    final_wav_path = os.path.join(job_dir, "audio.wav")
 
     try:
-        # اگر ویدیو وجود نداشت، دانلودش کن
-        if not os.path.exists(temp_video_path):
-            download_media(video_url, temp_video_path)
-        
-        # استخراج فایل صوتی WAV برای جمینای
+        download_media(video_url, temp_video_path)
+
         cmd = [
-            "ffmpeg", "-y", "-i", temp_video_path,
-            "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2",
+            "ffmpeg", "-y", "-nostdin",
+            "-i", temp_video_path,
+            "-vn",
+            "-acodec", "pcm_s16le",
+            "-ar", "44100",
+            "-ac", "2",
             final_wav_path
         ]
-        subprocess.run(cmd, check=True)
+        run_ffmpeg(cmd, timeout=600)
 
+        # نکته: چون فایل پاسخ داده می‌شود، job_dir را اینجا پاک نمی‌کنیم
+        # (FileResponse بعد از return فایل را می‌خواند)
         return FileResponse(path=final_wav_path, filename="audio.wav", media_type="audio/wav")
     except Exception as e:
+        shutil.rmtree(job_dir, ignore_errors=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -271,7 +366,7 @@ def get_audio_for_gemini(data: dict):
 def process_subtitles(data: ProcessSubtitlesRequest, background_tasks: BackgroundTasks):
     """اندپوینت دریافت زیرنویس‌ها و شروع رندر نهایی ویدیو"""
     background_tasks.add_task(background_subtitle_process, data.video_url, data.subtitles)
-    
+
     return {
         "status": "started",
         "message": "پروسه ساخت و چسباندن زیرنویس آغاز شد. نتیجه در تلگرام ارسال خواهد شد."
