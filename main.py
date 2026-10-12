@@ -208,6 +208,10 @@ def create_ass_file(subtitles, ass_path, video_w, video_h):
     """ساخت فایل ASS با PlayRes برابر ابعاد واقعی ویدیو تا FontSize درست کار کند."""
     font_size = max(14, int(video_h * FONT_SIZE_RATIO))
 
+    # 👇 مقادیر مستقیم اینجا (نه از متغیر بالای فایل)
+    alignment = 2            # 2=پایین-وسط
+    margin_bottom = 200      # فاصله از پایین (پیکسل). کمتر = چسبیده‌تر به پایین
+
     header = (
         "[Script Info]\n"
         "ScriptType: v4.00+\n"
@@ -222,22 +226,25 @@ def create_ass_file(subtitles, ass_path, video_w, video_h):
         "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
         f"Style: Default,{FONT_NAME},{font_size},"
-        f"{PRIMARY_COLOR},"       # PrimaryColour (متن)
-        "&H000000FF,"             # SecondaryColour
-        "&H00000000,"             # OutlineColour
-        f"{BACK_COLOR},"          # BackColour (کادر مشکی)
-        "0,0,0,0,"                # Bold, Italic, Underline, StrikeOut
-        "100,100,0,0,"            # ScaleX, ScaleY, Spacing, Angle
-        "3,"                      # BorderStyle=3 → کادر مستطیلی
-        f"{BOX_PADDING},"         # Outline → پدینگ داخلی کادر
-        "0,"                      # Shadow
-        f"{SUBTITLE_ALIGNMENT},"  # Alignment
-        "40,40,250,"               # MarginL, MarginR, MarginV
-        "1\n"                     # Encoding
+        f"{PRIMARY_COLOR},"
+        "&H000000FF,"
+        "&H00000000,"
+        f"{BACK_COLOR},"
+        "0,0,0,0,"
+        "100,100,0,0,"
+        "3,"
+        f"{BOX_PADDING},"
+        "0,"
+        f"{alignment},"          # 👈 مستقیم 2
+        f"40,40,{margin_bottom},"# 👈 مستقیم 200
+        "1\n"
         "\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     )
+
+    RLE = "\u202B"
+    PDF = "\u202C"
 
     with open(ass_path, "w", encoding="utf-8") as f:
         f.write(header)
@@ -245,13 +252,10 @@ def create_ass_file(subtitles, ass_path, video_w, video_h):
             start = seconds_to_ass_time(sub.start_seconds)
             end = seconds_to_ass_time(sub.end_seconds)
             raw = sub.persian_text.replace("\r", "").replace("\n", "\\N")
-            # کاراکتر RTL Embedding برای اینکه libass متن فارسی رو درست بچینه
-            RLE = "\u202B"
-            PDF = "\u202C"
             text = f"{RLE}{raw}{PDF}"
             f.write(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}\n")
 
-    return font_size
+    return font_size, alignment, margin_bottom
 
 
 # ---------------------------------------------------------------
@@ -310,8 +314,9 @@ def background_subtitle_process(video_url: str, subtitles: list):
         logging.info(f"ابعاد ویدیو: {v_w}x{v_h}")
 
         # 3) ساخت ASS با PlayRes = ابعاد ویدیو
-        font_size = create_ass_file(subtitles, ass_path, v_w, v_h)
-        logging.info(f"فایل ASS ساخته شد. FontSize={font_size}, Alignment={SUBTITLE_ALIGNMENT}")
+        font_size, alignment, margin_bottom = create_ass_file(subtitles, ass_path, v_w, v_h)
+        logging.info(f"فایل ASS ساخته شد. FontSize={font_size}, Alignment={alignment}, MarginV={margin_bottom}")
+        
 
         update_telegram_message(
             msg_id,
