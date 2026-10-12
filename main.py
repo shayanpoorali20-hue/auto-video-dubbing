@@ -178,7 +178,6 @@ def download_media(url: str, output_path: str):
 
 
 def seconds_to_srt_time(seconds: float) -> str:
-    # جلوگیری از خطای NaN/منفی
     if seconds is None or seconds < 0:
         seconds = 0.0
 
@@ -199,12 +198,6 @@ def create_srt_file(subtitles: list, srt_path: str):
 
 
 def run_ffmpeg(cmd: list, timeout: int = FFMPEG_TIMEOUT):
-    """
-    اجرای امن ffmpeg:
-    - stdin بسته می‌شود تا ffmpeg منتظر ورودی نماند
-    - stderr لاگ می‌شود تا در صورت خطا دلیل مشخص باشد
-    - timeout برای جلوگیری از هنگ ابدی
-    """
     logging.info(f"اجرای ffmpeg: {' '.join(cmd)}")
     try:
         result = subprocess.run(
@@ -220,7 +213,6 @@ def run_ffmpeg(cmd: list, timeout: int = FFMPEG_TIMEOUT):
 
     stderr_text = result.stderr.decode(errors="ignore") if result.stderr else ""
     if result.returncode != 0:
-        # فقط ۲۰۰۰ کاراکتر آخر stderr را لاگ کن
         tail = stderr_text[-2000:]
         logging.error(f"ffmpeg با کد {result.returncode} خارج شد:\n{tail}")
         raise RuntimeError(f"ffmpeg خطا داد (کد {result.returncode}):\n{tail}")
@@ -239,14 +231,12 @@ def background_subtitle_process(video_url: str, subtitles: list):
     start_time = time.time()
     msg_id = send_telegram_message("⏳ <b>شروع پروسه ساخت و چسباندن زیرنویس...</b>\nدر حال بررسی فایل‌ها...")
 
-    # پوشه موقت یکتا برای هر درخواست
     job_dir = tempfile.mkdtemp(dir=TEMP_DIR)
     video_path = os.path.join(job_dir, "original_video.mp4")
     srt_path = os.path.join(job_dir, "subs.srt")
     output_path = os.path.join(job_dir, "final_subtitled_video.mp4")
 
     try:
-        # دانلود ویدیو
         if not os.path.exists(video_path):
             update_telegram_message(msg_id, "⬇️ <b>در حال دانلود ویدیو از لینک...</b>")
             download_media(video_url, video_path)
@@ -254,7 +244,6 @@ def background_subtitle_process(video_url: str, subtitles: list):
         if not os.path.exists(video_path):
             raise RuntimeError("دانلود ویدیو ناموفق بود؛ فایل خروجی ساخته نشد.")
 
-        # ساخت فایل SRT
         create_srt_file(subtitles, srt_path)
 
         update_telegram_message(
@@ -263,13 +252,18 @@ def background_subtitle_process(video_url: str, subtitles: list):
         )
         logging.info("شروع رندر ویدیو با زیرنویس توسط FFmpeg")
 
-        # escape کردن مسیر SRT برای فیلتر subtitles
+        # مسیر پوشه فونت‌ها و escape کردن مسیرها برای فیلتر subtitles
+        fonts_dir = os.path.abspath("fonts")
         srt_path_escaped = srt_path.replace("\\", "/").replace(":", "\\:")
+        fonts_dir_escaped = fonts_dir.replace("\\", "/").replace(":", "\\:")
+
+        # استایل‌دهی: فونت وزیر (Vazir)، اندازه مناسب، تراز وسط صفحه (Alignment=5) و حاشیه مشکی
+        style_params = "FontName=Vazir,FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=5"
 
         ffmpeg_cmd = [
             "ffmpeg", "-y", "-nostdin",
             "-i", video_path,
-            "-vf", f"subtitles='{srt_path_escaped}'",
+            "-vf", f"subtitles='{srt_path_escaped}':fontsdir='{fonts_dir_escaped}':force_style='{style_params}'",
             "-c:v", "libx264",
             "-preset", "ultrafast",
             "-crf", "23",
@@ -313,7 +307,6 @@ def background_subtitle_process(video_url: str, subtitles: list):
         )
     finally:
         render_lock.release()
-        # پاک‌سازی فایل‌های موقت این job
         try:
             shutil.rmtree(job_dir, ignore_errors=True)
         except Exception as cleanup_err:
@@ -354,8 +347,6 @@ def get_audio_for_gemini(data: dict):
         ]
         run_ffmpeg(cmd, timeout=600)
 
-        # نکته: چون فایل پاسخ داده می‌شود، job_dir را اینجا پاک نمی‌کنیم
-        # (FileResponse بعد از return فایل را می‌خواند)
         return FileResponse(path=final_wav_path, filename="audio.wav", media_type="audio/wav")
     except Exception as e:
         shutil.rmtree(job_dir, ignore_errors=True)
