@@ -16,15 +16,11 @@ from pydantic import BaseModel
 import yt_dlp
 import requests
 
-# تنظیمات Logging برای مشاهده دقیق جزئیات در Render
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 app = FastAPI(title="Instagram Auto Subtitle Service")
 
-# پوشه موقت کاری برای کل پروژه
 TEMP_DIR = tempfile.mkdtemp()
-
-# قفل اختصاصی برای جلوگیری از اجرای همزمان چند رندر سنگین
 render_lock = threading.Lock()
 
 # ==========================================
@@ -33,11 +29,18 @@ render_lock = threading.Lock()
 TELEGRAM_BOT_TOKEN = "8956121858:AAF1ZQD-KCKSCbd-GOfGc2CziHpBFBONhxA"
 TELEGRAM_CHAT_ID = "5080371184"
 
-# حداکثر حجم مجاز برای ارسال ویدیو در Bot API (50MB)
 TELEGRAM_MAX_VIDEO_MB = 50
-
-# تایم‌اوت ffmpeg (ثانیه)
 FFMPEG_TIMEOUT = 1800
+
+# ---------- تنظیمات ظاهر زیرنویس ----------
+# هر کدوم رو خواستی تغییر بده
+FONT_NAME = "Vazir"                 # اسم فونت داخل فایل ttf
+FONT_SIZE_RATIO = 0.025             # نسبت ارتفاع فونت به ارتفاع ویدیو (0.02 = خیلی کوچک، 0.04 = بزرگ)
+SUBTITLE_ALIGNMENT = 5              # 5=وسط-وسط ، 2=پایین-وسط ، 8=بالا-وسط
+BOX_PADDING = 8                     # پدینگ داخلی کادر مشکی
+BACK_COLOR = "&H00000000"           # بک‌گراند کادر (00=اوپک کامل، 80=نیمه‌شفاف)
+PRIMARY_COLOR = "&H00FFFFFF"        # رنگ متن (سفید)
+# --------------------------------------------
 
 
 class SubtitleItem(BaseModel):
@@ -55,7 +58,7 @@ class ProcessSubtitlesRequest(BaseModel):
 
 
 # ---------------------------------------------------------------
-# توابع کمکی ارتباط با تلگرام
+# توابع تلگرام
 # ---------------------------------------------------------------
 def send_telegram_message(text: str) -> int:
     if not TELEGRAM_BOT_TOKEN:
@@ -76,12 +79,7 @@ def update_telegram_message(message_id: int, text: str):
     if not message_id or not TELEGRAM_BOT_TOKEN:
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "message_id": message_id,
-        "text": text,
-        "parse_mode": "HTML"
-    }
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "message_id": message_id, "text": text, "parse_mode": "HTML"}
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
@@ -96,13 +94,12 @@ def send_telegram_video(video_path: str, caption: str):
     file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
     if file_size_mb > TELEGRAM_MAX_VIDEO_MB:
         send_telegram_message(
-            f"⚠️ <b>حجم ویدیو {file_size_mb:.2f} مگابایت است و از حد مجاز تلگرام "
-            f"({TELEGRAM_MAX_VIDEO_MB}MB) بیشتر است.</b>\n"
-            f"فایل روی سرور ساخته شد اما قابل ارسال از طریق Bot API نیست."
+            f"⚠️ <b>حجم ویدیو {file_size_mb:.2f} مگابایت و از حد مجاز تلگرام "
+            f"({TELEGRAM_MAX_VIDEO_MB}MB) بیشتر است.</b>"
         )
         return
 
-    send_telegram_message(f"📦 <b>شروع آپلود ویدیوی زیرنویس‌شده...</b>\nحجم فایل: {file_size_mb:.2f} مگابایت")
+    send_telegram_message(f"📦 <b>شروع آپلود ویدیو...</b>\nحجم: {file_size_mb:.2f} مگابایت")
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
     boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
@@ -149,7 +146,7 @@ def send_telegram_video(video_path: str, caption: str):
         with urllib.request.urlopen(req, timeout=600) as response:
             res = json.loads(response.read().decode())
             if res.get("ok"):
-                send_telegram_message("🚀 <b>ویدیو با زیرنویس با موفقیت ارسال شد!</b>")
+                send_telegram_message("🚀 <b>ویدیو با موفقیت ارسال شد!</b>")
             else:
                 send_telegram_message(f"❌ <b>خطای تلگرام:</b> {res.get('description')}")
     except Exception as e:
@@ -157,7 +154,7 @@ def send_telegram_video(video_path: str, caption: str):
 
 
 # ---------------------------------------------------------------
-# توابع کمکی دانلود ویدیو و پردازش SRT
+# دانلود و ابزار
 # ---------------------------------------------------------------
 def download_media(url: str, output_path: str):
     ydl_opts = {
@@ -172,69 +169,103 @@ def download_media(url: str, output_path: str):
         ydl_opts['cookiefile'] = "cookies.txt"
     elif os.path.exists("cookie.txt"):
         ydl_opts['cookiefile'] = "cookie.txt"
-
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
 
 
-def seconds_to_srt_time(seconds: float) -> str:
-    if seconds is None or seconds < 0:
-        seconds = 0.0
-
-    total_ms = int(round(seconds * 1000))
-    hours = total_ms // 3600000
-    minutes = (total_ms % 3600000) // 60000
-    secs = (total_ms % 60000) // 1000
-    milliseconds = total_ms % 1000
-    return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
-
-
-def create_srt_file(subtitles: list, srt_path: str):
-    with open(srt_path, "w", encoding="utf-8") as f:
-        for idx, sub in enumerate(subtitles, start=1):
-            start_str = seconds_to_srt_time(sub.start_seconds)
-            end_str = seconds_to_srt_time(sub.end_seconds)
-            f.write(f"{idx}\n{start_str} --> {end_str}\n{sub.persian_text}\n\n")
-
-
-def get_video_size(video_path: str) -> str:
-    """ابعاد ویدیو رو با ffprobe می‌گیره. اگه نشد، پیش‌فرض 1080x1920 برمی‌گردونه."""
+def get_video_size(video_path: str):
     try:
         probe = subprocess.run(
-            [
-                "ffprobe", "-v", "error",
-                "-select_streams", "v:0",
-                "-show_entries", "stream=width,height",
-                "-of", "csv=s=x:p=0",
-                video_path
-            ],
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height",
+             "-of", "csv=s=x:p=0", video_path],
             capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL
         )
         size = probe.stdout.strip()
         if "x" in size:
-            return size
+            w, h = map(int, size.split("x"))
+            return w, h
     except Exception as e:
         logging.warning(f"ffprobe خطا داد: {e}")
-    return "1080x1920"
+    return 1080, 1920
 
 
+# ---------------------------------------------------------------
+# ساخت فایل ASS (جایگزین SRT)
+# ---------------------------------------------------------------
+def seconds_to_ass_time(seconds: float) -> str:
+    if seconds is None or seconds < 0:
+        seconds = 0.0
+    total_cs = int(round(seconds * 100))
+    h = total_cs // 360000
+    m = (total_cs % 360000) // 6000
+    s = (total_cs % 6000) // 100
+    cs = total_cs % 100
+    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+
+def create_ass_file(subtitles, ass_path, video_w, video_h):
+    """ساخت فایل ASS با PlayRes برابر ابعاد واقعی ویدیو تا FontSize درست کار کند."""
+    font_size = max(14, int(video_h * FONT_SIZE_RATIO))
+
+    header = (
+        "[Script Info]\n"
+        "ScriptType: v4.00+\n"
+        f"PlayResX: {video_w}\n"
+        f"PlayResY: {video_h}\n"
+        "WrapStyle: 0\n"
+        "ScaledBorderAndShadow: yes\n"
+        "YCbCr Matrix: TV.709\n"
+        "\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
+        "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Default,{FONT_NAME},{font_size},"
+        f"{PRIMARY_COLOR},"       # PrimaryColour (متن)
+        "&H000000FF,"             # SecondaryColour
+        "&H00000000,"             # OutlineColour
+        f"{BACK_COLOR},"          # BackColour (کادر مشکی)
+        "0,0,0,0,"                # Bold, Italic, Underline, StrikeOut
+        "100,100,0,0,"            # ScaleX, ScaleY, Spacing, Angle
+        "3,"                      # BorderStyle=3 → کادر مستطیلی
+        f"{BOX_PADDING},"         # Outline → پدینگ داخلی کادر
+        "0,"                      # Shadow
+        f"{SUBTITLE_ALIGNMENT},"  # Alignment
+        "40,40,40,"               # MarginL, MarginR, MarginV
+        "1\n"                     # Encoding
+        "\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    )
+
+    with open(ass_path, "w", encoding="utf-8") as f:
+        f.write(header)
+        for sub in subtitles:
+            start = seconds_to_ass_time(sub.start_seconds)
+            end = seconds_to_ass_time(sub.end_seconds)
+            text = sub.persian_text.replace("\r", "").replace("\n", "\\N")
+            f.write(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}\n")
+
+    return font_size
+
+
+# ---------------------------------------------------------------
+# اجرای ffmpeg
+# ---------------------------------------------------------------
 def run_ffmpeg(cmd: list, timeout: int = FFMPEG_TIMEOUT):
     logging.info(f"اجرای ffmpeg: {' '.join(cmd)}")
     t0 = time.time()
     try:
         result = subprocess.run(
-            cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-            check=False,
+            cmd, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=timeout, check=False,
         )
     except subprocess.TimeoutExpired:
-        raise RuntimeError(f"ffmpeg بعد از {timeout} ثانیه تایم‌اوت شد و متوقف شد.")
+        raise RuntimeError(f"ffmpeg بعد از {timeout} ثانیه تایم‌اوت شد.")
 
-    elapsed = time.time() - t0
-    logging.info(f"⏱ زمان اجرای ffmpeg: {elapsed:.1f} ثانیه")
+    logging.info(f"⏱ زمان اجرای ffmpeg: {time.time() - t0:.1f} ثانیه")
 
     stderr_text = result.stderr.decode(errors="ignore") if result.stderr else ""
     if result.returncode != 0:
@@ -245,89 +276,57 @@ def run_ffmpeg(cmd: list, timeout: int = FFMPEG_TIMEOUT):
 
 
 # ---------------------------------------------------------------
-# پروسه اصلی رندر ویدیو و چسباندن زیرنویس در پس‌زمینه
+# پروسه اصلی رندر
 # ---------------------------------------------------------------
 def background_subtitle_process(video_url: str, subtitles: list):
     if not render_lock.acquire(blocking=False):
         logging.warning("یک پروسه رندر دیگر در حال اجراست.")
-        send_telegram_message("⚠️ یک پروسه رندر دیگر در حال اجراست. لطفاً بعداً تلاش کنید.")
+        send_telegram_message("⚠️ یک پروسه رندر دیگر در حال اجراست.")
         return
 
     start_time = time.time()
-    msg_id = send_telegram_message("⏳ <b>شروع پروسه ساخت و چسباندن زیرنویس...</b>\nدر حال بررسی فایل‌ها...")
+    msg_id = send_telegram_message("⏳ <b>شروع پروسه ساخت زیرنویس...</b>")
 
     job_dir = tempfile.mkdtemp(dir=TEMP_DIR)
     video_path = os.path.join(job_dir, "original_video.mp4")
-    srt_path = os.path.join(job_dir, "subs.srt")
+    ass_path = os.path.join(job_dir, "subs.ass")
     output_path = os.path.join(job_dir, "final_subtitled_video.mp4")
 
     try:
-        # 1) دانلود ویدیو
+        # 1) دانلود
         if not os.path.exists(video_path):
-            update_telegram_message(msg_id, "⬇️ <b>در حال دانلود ویدیو از لینک...</b>")
+            update_telegram_message(msg_id, "⬇️ <b>در حال دانلود ویدیو...</b>")
             download_media(video_url, video_path)
 
         if not os.path.exists(video_path):
-            raise RuntimeError("دانلود ویدیو ناموفق بود؛ فایل خروجی ساخته نشد.")
+            raise RuntimeError("دانلود ویدیو ناموفق بود.")
 
-        # 2) ساخت فایل SRT
-        create_srt_file(subtitles, srt_path)
-
-        # 3) تشخیص ابعاد واقعی ویدیو
-        video_size = get_video_size(video_path)
-        try:
-            v_w, v_h = map(int, video_size.split("x"))
-        except Exception:
-            v_w, v_h = 1080, 1920
-            video_size = "1080x1920"
+        # 2) ابعاد واقعی ویدیو
+        v_w, v_h = get_video_size(video_path)
         logging.info(f"ابعاد ویدیو: {v_w}x{v_h}")
 
-        # 4) اندازه فونت = ۲.۵٪ ارتفاع ویدیو (نصف حالت معمول)
-        font_size = max(20, int(v_h * 0.025))
-
-        # 5) استایل: وسط صفحه، بک‌گراند مشکی مستطیلی
-        style_params = ",".join([
-            "FontName=Vazir",
-            f"FontSize={font_size}",
-            "PrimaryColour=&H00FFFFFF",   # متن سفید
-            "OutlineColour=&H00000000",   # رنگ حاشیه کادر (مشکی)
-            "BackColour=&H00000000",      # بک‌گراند مشکی کاملاً اوپک
-            "BorderStyle=3",              # کادر مستطیلی به جای outline خطی
-            "Outline=2",                  # پدینگ داخلی کادر
-            "Shadow=0",
-            "Alignment=5",                # وسط-وسط
-            "MarginL=30",
-            "MarginR=30",
-            "MarginV=0",
-        ])
-
-        # 6) مسیرها
-        fonts_dir = os.path.abspath("fonts")
-        srt_path_escaped = srt_path.replace("\\", "/").replace(":", "\\:")
-
-        if os.path.isdir(fonts_dir):
-            fonts_dir_escaped = fonts_dir.replace("\\", "/").replace(":", "\\:")
-            subtitles_filter = (
-                f"subtitles='{srt_path_escaped}'"
-                f":fontsdir='{fonts_dir_escaped}'"
-                f":original_size={video_size}"
-                f":force_style='{style_params}'"
-            )
-        else:
-            logging.warning(f"پوشه فونت پیدا نشد: {fonts_dir} — از فونت پیش‌فرض استفاده می‌شود.")
-            subtitles_filter = (
-                f"subtitles='{srt_path_escaped}'"
-                f":original_size={video_size}"
-                f":force_style='{style_params}'"
-            )
+        # 3) ساخت ASS با PlayRes = ابعاد ویدیو
+        font_size = create_ass_file(subtitles, ass_path, v_w, v_h)
+        logging.info(f"فایل ASS ساخته شد. FontSize={font_size}, Alignment={SUBTITLE_ALIGNMENT}")
 
         update_telegram_message(
             msg_id,
-            "🎬 <b>در حال حک کردن زیرنویس روی ویدیو (FFmpeg)...</b>\n[████████░░] 80%"
+            f"🎬 <b>در حال حک کردن زیرنویس روی ویدیو...</b>\n"
+            f"📐 ابعاد: {v_w}×{v_h}\n"
+            f"🔤 اندازه فونت: {font_size}px"
         )
-        logging.info("شروع رندر ویدیو با زیرنویس توسط FFmpeg")
 
-        # 7) دستور ffmpeg
+        # 4) فیلتر subtitles با فایل ASS
+        ass_path_escaped = ass_path.replace("\\", "/").replace(":", "\\:")
+        fonts_dir = os.path.abspath("fonts")
+        if os.path.isdir(fonts_dir):
+            fonts_dir_escaped = fonts_dir.replace("\\", "/").replace(":", "\\:")
+            subtitles_filter = f"subtitles='{ass_path_escaped}':fontsdir='{fonts_dir_escaped}'"
+        else:
+            logging.warning(f"پوشه فونت پیدا نشد: {fonts_dir}")
+            subtitles_filter = f"subtitles='{ass_path_escaped}'"
+
+        # 5) اجرا
         ffmpeg_cmd = [
             "ffmpeg", "-y", "-nostdin",
             "-i", video_path,
@@ -342,47 +341,39 @@ def background_subtitle_process(video_url: str, subtitles: list):
         run_ffmpeg(ffmpeg_cmd, timeout=FFMPEG_TIMEOUT)
 
         if not os.path.exists(output_path):
-            raise RuntimeError("فایل خروجی پس از اجرای ffmpeg ساخته نشد.")
+            raise RuntimeError("فایل خروجی ساخته نشد.")
 
         output_size_mb = os.path.getsize(output_path) / (1024 * 1024)
         total_time = round(time.time() - start_time, 1)
 
         update_telegram_message(
             msg_id,
-            f"✨ <b>زیرنویس با موفقیت روی ویدیو قرار گرفت!</b>\n"
+            f"✨ <b>زیرنویس با موفقیت چسبید!</b>\n"
             f"⏱ زمان کل: {total_time} ثانیه\n"
-            f"📦 حجم خروجی: {output_size_mb:.2f} مگابایت"
+            f"📦 حجم: {output_size_mb:.2f} مگابایت"
         )
 
         caption = (
             f"✨ <b>ویدیوی زیرنویس‌شده آماده شد!</b>\n"
-            f"⏱ زمان ساخت: {total_time} ثانیه\n"
-            f"📦 حجم: {output_size_mb:.2f} مگابایت"
+            f"⏱ زمان: {total_time}s | 📦 {output_size_mb:.1f}MB"
         )
         send_telegram_video(output_path, caption)
 
     except Exception as e:
         total_time = round(time.time() - start_time, 1)
         logging.exception("❌ خطا در رندر زیرنویس")
-        err_text = str(e)[:1500]
         update_telegram_message(
             msg_id,
-            f"❌ <b>خطا در پردازش ویدیو!</b>\n"
-            f"⏱ بعد از {total_time} ثانیه\n"
-            f"<code>{err_text}</code>"
+            f"❌ <b>خطا در پردازش!</b>\n⏱ بعد از {total_time}s\n<code>{str(e)[:1000]}</code>"
         )
     finally:
         render_lock.release()
-        try:
-            shutil.rmtree(job_dir, ignore_errors=True)
-        except Exception as cleanup_err:
-            logging.warning(f"خطا در پاک‌سازی پوشه موقت: {cleanup_err}")
+        shutil.rmtree(job_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------
-# اندپوینت‌های FastAPI
+# اندپوینت‌ها
 # ---------------------------------------------------------------
-
 @app.get("/")
 def health_check():
     return {"status": "ok", "message": "Subtitle Pipeline Server is Ready"}
@@ -390,10 +381,9 @@ def health_check():
 
 @app.post("/get-audio-for-gemini")
 def get_audio_for_gemini(data: dict):
-    """اندپوینت برای دانلود ویدیو و استخراج فایل صوتی جهت تحویل به جمینای"""
     video_url = data.get("video_url")
     if not video_url:
-        raise HTTPException(status_code=400, detail="video_url ارسال نشده است.")
+        raise HTTPException(status_code=400, detail="video_url ارسال نشده.")
 
     job_dir = tempfile.mkdtemp(dir=TEMP_DIR)
     temp_video_path = os.path.join(job_dir, "original_video.mp4")
@@ -401,18 +391,14 @@ def get_audio_for_gemini(data: dict):
 
     try:
         download_media(video_url, temp_video_path)
-
         cmd = [
             "ffmpeg", "-y", "-nostdin",
             "-i", temp_video_path,
-            "-vn",
-            "-acodec", "pcm_s16le",
-            "-ar", "44100",
-            "-ac", "2",
+            "-vn", "-acodec", "pcm_s16le",
+            "-ar", "44100", "-ac", "2",
             final_wav_path
         ]
         run_ffmpeg(cmd, timeout=600)
-
         return FileResponse(path=final_wav_path, filename="audio.wav", media_type="audio/wav")
     except Exception as e:
         shutil.rmtree(job_dir, ignore_errors=True)
@@ -421,10 +407,8 @@ def get_audio_for_gemini(data: dict):
 
 @app.post("/process-subtitles")
 def process_subtitles(data: ProcessSubtitlesRequest, background_tasks: BackgroundTasks):
-    """اندپوینت دریافت زیرنویس‌ها و شروع رندر نهایی ویدیو"""
     background_tasks.add_task(background_subtitle_process, data.video_url, data.subtitles)
-
     return {
         "status": "started",
-        "message": "پروسه ساخت و چسباندن زیرنویس آغاز شد. نتیجه در تلگرام ارسال خواهد شد."
+        "message": "پروسه آغاز شد. نتیجه در تلگرام ارسال خواهد شد."
     }
