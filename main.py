@@ -197,8 +197,30 @@ def create_srt_file(subtitles: list, srt_path: str):
             f.write(f"{idx}\n{start_str} --> {end_str}\n{sub.persian_text}\n\n")
 
 
+def get_video_size(video_path: str) -> str:
+    """ابعاد ویدیو رو با ffprobe می‌گیره. اگه نشد، پیش‌فرض 1080x1920 برمی‌گردونه."""
+    try:
+        probe = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "csv=s=x:p=0",
+                video_path
+            ],
+            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL
+        )
+        size = probe.stdout.strip()
+        if "x" in size:
+            return size
+    except Exception as e:
+        logging.warning(f"ffprobe خطا داد: {e}")
+    return "1080x1920"
+
+
 def run_ffmpeg(cmd: list, timeout: int = FFMPEG_TIMEOUT):
     logging.info(f"اجرای ffmpeg: {' '.join(cmd)}")
+    t0 = time.time()
     try:
         result = subprocess.run(
             cmd,
@@ -210,6 +232,9 @@ def run_ffmpeg(cmd: list, timeout: int = FFMPEG_TIMEOUT):
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"ffmpeg بعد از {timeout} ثانیه تایم‌اوت شد و متوقف شد.")
+
+    elapsed = time.time() - t0
+    logging.info(f"⏱ زمان اجرای ffmpeg: {elapsed:.1f} ثانیه")
 
     stderr_text = result.stderr.decode(errors="ignore") if result.stderr else ""
     if result.returncode != 0:
@@ -237,6 +262,7 @@ def background_subtitle_process(video_url: str, subtitles: list):
     output_path = os.path.join(job_dir, "final_subtitled_video.mp4")
 
     try:
+        # 1) دانلود ویدیو
         if not os.path.exists(video_path):
             update_telegram_message(msg_id, "⬇️ <b>در حال دانلود ویدیو از لینک...</b>")
             download_media(video_url, video_path)
@@ -244,7 +270,56 @@ def background_subtitle_process(video_url: str, subtitles: list):
         if not os.path.exists(video_path):
             raise RuntimeError("دانلود ویدیو ناموفق بود؛ فایل خروجی ساخته نشد.")
 
+        # 2) ساخت فایل SRT
         create_srt_file(subtitles, srt_path)
+
+        # 3) تشخیص ابعاد واقعی ویدیو
+        video_size = get_video_size(video_path)
+        try:
+            v_w, v_h = map(int, video_size.split("x"))
+        except Exception:
+            v_w, v_h = 1080, 1920
+            video_size = "1080x1920"
+        logging.info(f"ابعاد ویدیو: {v_w}x{v_h}")
+
+        # 4) اندازه فونت = ۲.۵٪ ارتفاع ویدیو (نصف حالت معمول)
+        font_size = max(20, int(v_h * 0.025))
+
+        # 5) استایل: وسط صفحه، بک‌گراند مشکی مستطیلی
+        style_params = ",".join([
+            "FontName=Vazir",
+            f"FontSize={font_size}",
+            "PrimaryColour=&H00FFFFFF",   # متن سفید
+            "OutlineColour=&H00000000",   # رنگ حاشیه کادر (مشکی)
+            "BackColour=&H00000000",      # بک‌گراند مشکی کاملاً اوپک
+            "BorderStyle=3",              # کادر مستطیلی به جای outline خطی
+            "Outline=2",                  # پدینگ داخلی کادر
+            "Shadow=0",
+            "Alignment=5",                # وسط-وسط
+            "MarginL=30",
+            "MarginR=30",
+            "MarginV=0",
+        ])
+
+        # 6) مسیرها
+        fonts_dir = os.path.abspath("fonts")
+        srt_path_escaped = srt_path.replace("\\", "/").replace(":", "\\:")
+
+        if os.path.isdir(fonts_dir):
+            fonts_dir_escaped = fonts_dir.replace("\\", "/").replace(":", "\\:")
+            subtitles_filter = (
+                f"subtitles='{srt_path_escaped}'"
+                f":fontsdir='{fonts_dir_escaped}'"
+                f":original_size={video_size}"
+                f":force_style='{style_params}'"
+            )
+        else:
+            logging.warning(f"پوشه فونت پیدا نشد: {fonts_dir} — از فونت پیش‌فرض استفاده می‌شود.")
+            subtitles_filter = (
+                f"subtitles='{srt_path_escaped}'"
+                f":original_size={video_size}"
+                f":force_style='{style_params}'"
+            )
 
         update_telegram_message(
             msg_id,
@@ -252,29 +327,15 @@ def background_subtitle_process(video_url: str, subtitles: list):
         )
         logging.info("شروع رندر ویدیو با زیرنویس توسط FFmpeg")
 
-        # مسیر پوشه فونت‌ها و escape کردن مسیرها برای فیلتر subtitles
-        fonts_dir = os.path.abspath("fonts")
-        srt_path_escaped = srt_path.replace("\\", "/").replace(":", "\\:")
-        fonts_dir_escaped = fonts_dir.replace("\\", "/").replace(":", "\\:")
-
-        # تنظیمات استایل جدید:
-        # FontSize=16 (نصف شده نسبت به قبلی)
-        # Alignment=2 (تراز پایین-وسط با فاصله مناسب از پایین یا Alignment مناسب برای وسط صفحه)
-        # BorderStyle=3 (کادر مستطیلی پس‌زمینه)
-        # PrimaryColour=&H00FFFFFF (متن سفید)
-        # BackColour=&H80000000 یا رنگ کادر دلخواه برای بک‌گراند مشکی کامل
-        style_params = "FontName=Vazir,FontSize=16,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H00000000,BorderStyle=3,Outline=1,Shadow=0,Alignment=2,MarginV=420"
-
+        # 7) دستور ffmpeg
         ffmpeg_cmd = [
             "ffmpeg", "-y", "-nostdin",
             "-i", video_path,
-            "-vf", f"subtitles='{srt_path_escaped}':fontsdir='{fonts_dir_escaped}':force_style='{style_params}'",
+            "-vf", subtitles_filter,
             "-c:v", "libx264",
             "-preset", "ultrafast",
             "-crf", "23",
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-movflags", "+faststart",
+            "-c:a", "copy",
             output_path
         ]
 
