@@ -35,7 +35,7 @@ FFMPEG_TIMEOUT = 1800
 # ---------- تنظیمات ظاهر زیرنویس ----------
 # هر کدوم رو خواستی تغییر بده
 FONT_NAME = "Vazir"                 # اسم فونت داخل فایل ttf
-FONT_SIZE_RATIO = 0.032             # نسبت ارتفاع فونت به ارتفاع ویدیو (0.02 = خیلی کوچک، 0.04 = بزرگ)
+FONT_SIZE_RATIO = 0.035             # نسبت ارتفاع فونت به ارتفاع ویدیو (0.02 = خیلی کوچک، 0.04 = بزرگ)
 SUBTITLE_ALIGNMENT = 5              # 5=وسط-وسط ، 2=پایین-وسط ، 8=بالا-وسط
 BOX_PADDING = 8                     # پدینگ داخلی کادر مشکی
 BACK_COLOR = "&H00000000"           # بک‌گراند کادر (00=اوپک کامل، 80=نیمه‌شفاف)
@@ -232,7 +232,7 @@ def create_ass_file(subtitles, ass_path, video_w, video_h):
         f"{BOX_PADDING},"         # Outline → پدینگ داخلی کادر
         "0,"                      # Shadow
         f"{SUBTITLE_ALIGNMENT},"  # Alignment
-        "40,40,40,"               # MarginL, MarginR, MarginV
+        "40,40,250,"               # MarginL, MarginR, MarginV
         "1\n"                     # Encoding
         "\n"
         "[Events]\n"
@@ -244,7 +244,11 @@ def create_ass_file(subtitles, ass_path, video_w, video_h):
         for sub in subtitles:
             start = seconds_to_ass_time(sub.start_seconds)
             end = seconds_to_ass_time(sub.end_seconds)
-            text = sub.persian_text.replace("\r", "").replace("\n", "\\N")
+            raw = sub.persian_text.replace("\r", "").replace("\n", "\\N")
+            # کاراکتر RTL Embedding برای اینکه libass متن فارسی رو درست بچینه
+            RLE = "\u202B"
+            PDF = "\u202C"
+            text = f"{RLE}{raw}{PDF}"
             f.write(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}\n")
 
     return font_size
