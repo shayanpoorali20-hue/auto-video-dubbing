@@ -257,8 +257,13 @@ def background_subtitle_process(video_url: str, subtitles: list):
         srt_path_escaped = srt_path.replace("\\", "/").replace(":", "\\:")
         fonts_dir_escaped = fonts_dir.replace("\\", "/").replace(":", "\\:")
 
-        # استایل‌دهی: فونت وزیر (Vazir)، اندازه مناسب، تراز وسط صفحه (Alignment=5) و حاشیه مشکی
-        style_params = "FontName=Vazir,FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=5"
+        # تنظیمات استایل جدید:
+        # FontSize=16 (نصف شده نسبت به قبلی)
+        # Alignment=2 (تراز پایین-وسط با فاصله مناسب از پایین یا Alignment مناسب برای وسط صفحه)
+        # BorderStyle=3 (کادر مستطیلی پس‌زمینه)
+        # PrimaryColour=&H00FFFFFF (متن سفید)
+        # BackColour=&H80000000 یا رنگ کادر دلخواه برای بک‌گراند مشکی کامل
+        style_params = "FontName=Vazir,FontSize=16,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H00000000,BorderStyle=3,Outline=1,Shadow=0,Alignment=2,MarginV=420"
 
         ffmpeg_cmd = [
             "ffmpeg", "-y", "-nostdin",
