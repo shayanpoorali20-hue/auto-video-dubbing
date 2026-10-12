@@ -210,7 +210,7 @@ def create_ass_file(subtitles, ass_path, video_w, video_h):
 
     # 👇 مقادیر مستقیم اینجا (نه از متغیر بالای فایل)
     alignment = 2            # 2=پایین-وسط
-    margin_bottom = 200      # فاصله از پایین (پیکسل). کمتر = چسبیده‌تر به پایین
+    margin_bottom = 550      # فاصله از پایین (پیکسل). کمتر = چسبیده‌تر به پایین
 
     header = (
         "[Script Info]\n"
